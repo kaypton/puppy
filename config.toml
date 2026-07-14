@@ -19,6 +19,13 @@ listen_address = "127.0.0.1"
 # listen_port 是代理服务监听的 TCP 端口，取值范围为 1 到 65535。
 listen_port = 8848
 
+# 配置 tls_cert_file 和 tls_key_file 后，frontend 将通过 HTTPS 接受代理连接。
+# 两项必须同时配置；同时省略时继续使用普通 HTTP。相对路径基于进程工作目录。
+# 可运行 scripts/generate-proxy-certs.sh 生成本地开发证书，并让客户端信任
+# certs/ca-cert.pem。使用 IP 连接时，该 IP 必须包含在服务证书的 SAN 中。
+tls_cert_file = "./certs/proxy-cert.pem"
+tls_key_file = "./certs/proxy-key.pem"
+
 # username 是客户端连接此 HTTP 代理时使用的 Basic Auth 用户名。
 # username 和 password 必须同时填写或同时留空；同时留空表示不启用认证。
 username = "test"

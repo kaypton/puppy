@@ -2,6 +2,7 @@ package httpproxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -27,6 +28,10 @@ const (
 type ServerConfiguration struct {
 	ListenAddress string
 	ListenPort    uint16
+	// TLSCertFile and TLSKeyFile enable TLS for the proxy listener when both
+	// are non-empty. The files must contain a matching PEM certificate and key.
+	TLSCertFile string
+	TLSKeyFile  string
 	// Username and Password enable HTTP Basic proxy authentication when both
 	// are non-empty. When both are empty the proxy runs open (no auth).
 	Username string
@@ -47,9 +52,10 @@ type ServerConfiguration struct {
 
 // Server is an HTTP CONNECT proxy that fronts a ShimServer per connection.
 type Server struct {
-	config  ServerConfiguration
-	logger  *slog.Logger
-	backend common.Backend
+	config    ServerConfiguration
+	logger    *slog.Logger
+	backend   common.Backend
+	tlsConfig *tls.Config
 }
 
 // NewServer validates the configuration and returns a ready-to-run proxy.
@@ -59,6 +65,9 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	}
 	if config.ListenPort == 0 {
 		return nil, errors.New("httpproxy: listen port is required")
+	}
+	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
+		return nil, errors.New("httpproxy: TLS certificate and key files must both be set or both be empty")
 	}
 	if config.Backend == nil {
 		return nil, errors.New("httpproxy: backend is required")
@@ -74,7 +83,20 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{config: config, logger: logger, backend: config.Backend}, nil
+
+	var tlsConfig *tls.Config
+	if config.TLSCertFile != "" {
+		certificate, err := tls.LoadX509KeyPair(config.TLSCertFile, config.TLSKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("httpproxy: load TLS certificate and key: %w", err)
+		}
+		tlsConfig = &tls.Config{
+			Certificates: []tls.Certificate{certificate},
+			MinVersion:   tls.VersionTLS12,
+			NextProtos:   []string{"http/1.1"},
+		}
+	}
+	return &Server{config: config, logger: logger, backend: config.Backend, tlsConfig: tlsConfig}, nil
 }
 
 func normalizeCamouflageMethod(method CamouflageMethod) CamouflageMethod {
@@ -92,7 +114,11 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("httpproxy: listen: %w", err)
 	}
-	s.logger.Info("httpproxy listening", "addr", ln.Addr().String())
+	transport := "http"
+	if s.tlsConfig != nil {
+		transport = "https"
+	}
+	s.logger.Info("httpproxy listening", "addr", ln.Addr().String(), "transport", transport)
 
 	// Close the listener when ctx is cancelled to unblock Accept.
 	go func() {
@@ -125,8 +151,16 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
 
-	// Bound the handshake phase so a silent client cannot hold a goroutine forever.
-	_ = conn.SetReadDeadline(time.Now().Add(30 * time.Second))
+	// Bound both TLS and HTTP handshakes so a stalled read or write cannot hold
+	// a goroutine forever.
+	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+	preparedConn, err := s.prepareFrontendConn(ctx, conn)
+	if err != nil {
+		s.logger.Debug("TLS handshake failed", "remote", conn.RemoteAddr(), "err", err)
+		return
+	}
+	conn = preparedConn
 
 	target, frontend, err := s.handshake(conn)
 	if err != nil {
@@ -135,7 +169,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	// Handshake done; clear the deadline for the tunneled phase.
-	_ = conn.SetReadDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 
 	upstream, err := s.backend.Dial(ctx, target)
 	if err != nil {
@@ -165,4 +199,17 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	s.logger.Info("tunnel established", "target", target.Address(), "remote", conn.RemoteAddr())
 	_ = shimServer.Run(ctx)
 	s.logger.Info("tunnel closed", "target", target.Address())
+}
+
+// prepareFrontendConn completes the optional TLS transport handshake before
+// the HTTP CONNECT handshake starts.
+func (s *Server) prepareFrontendConn(ctx context.Context, conn net.Conn) (net.Conn, error) {
+	if s.tlsConfig == nil {
+		return conn, nil
+	}
+	tlsConn := tls.Server(conn, s.tlsConfig)
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return nil, fmt.Errorf("TLS handshake: %w", err)
+	}
+	return tlsConn, nil
 }

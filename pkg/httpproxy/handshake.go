@@ -103,6 +103,7 @@ func (s *Server) writeCamouflageError(conn net.Conn, connectMethod bool) {
 		}
 		s.writeResponse(conn, http.StatusNotFound, map[string]string{
 			"Content-Type": "text/html",
+			"Server":       "nginx",
 		}, notFoundHtml)
 	}
 }

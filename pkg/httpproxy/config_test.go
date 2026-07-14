@@ -27,6 +27,8 @@ func TestConfigurationValidate(t *testing.T) {
 	}{
 		{"missing address", func(c *Configuration) { c.ListenAddress = "" }, "listen_address"},
 		{"missing port", func(c *Configuration) { c.ListenPort = 0 }, "listen_port"},
+		{"certificate only", func(c *Configuration) { c.TLSCertFile = "proxy-cert.pem" }, "tls_cert_file and tls_key_file"},
+		{"key only", func(c *Configuration) { c.TLSKeyFile = "proxy-key.pem" }, "tls_cert_file and tls_key_file"},
 		{"unpaired credentials", func(c *Configuration) { c.Username = "alice" }, "username and password"},
 		{"unknown camouflage method", func(c *Configuration) { c.CamouflageMethod = "unknown" }, "camouflage_method"},
 		{"missing backend", func(c *Configuration) { c.Backend = "" }, "backend reference"},
@@ -50,6 +52,8 @@ func TestConfigurationServerConfig(t *testing.T) {
 	config := Configuration{
 		ListenAddress:    "127.0.0.1",
 		ListenPort:       8080,
+		TLSCertFile:      "proxy-cert.pem",
+		TLSKeyFile:       "proxy-key.pem",
 		Username:         "alice",
 		Password:         "secret",
 		Camouflage:       true,
@@ -61,6 +65,9 @@ func TestConfigurationServerConfig(t *testing.T) {
 	serverConfig := config.ServerConfig(backend, 65536, logger)
 	if serverConfig.ListenAddress != config.ListenAddress || serverConfig.ListenPort != config.ListenPort {
 		t.Fatalf("listen configuration = %s:%d", serverConfig.ListenAddress, serverConfig.ListenPort)
+	}
+	if serverConfig.TLSCertFile != config.TLSCertFile || serverConfig.TLSKeyFile != config.TLSKeyFile {
+		t.Fatal("TLS certificate configuration was not copied")
 	}
 	if serverConfig.Username != config.Username || serverConfig.Password != config.Password {
 		t.Fatal("credentials were not copied")

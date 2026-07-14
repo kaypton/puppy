@@ -15,6 +15,8 @@ const Type = "httpproxy"
 type Configuration struct {
 	ListenAddress    string           `toml:"listen_address"`
 	ListenPort       uint16           `toml:"listen_port"`
+	TLSCertFile      string           `toml:"tls_cert_file"`
+	TLSKeyFile       string           `toml:"tls_key_file"`
 	Username         string           `toml:"username"`
 	Password         string           `toml:"password"`
 	Camouflage       bool             `toml:"camouflage"`
@@ -30,6 +32,9 @@ func (c Configuration) Validate() error {
 	}
 	if c.ListenPort == 0 {
 		return errors.New("listen_port is required")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("tls_cert_file and tls_key_file must both be set or both be empty")
 	}
 	if (c.Username == "") != (c.Password == "") {
 		return errors.New("username and password must both be set or both be empty")
@@ -51,6 +56,8 @@ func (c Configuration) ServerConfig(backend common.Backend, shimBufferSize int, 
 	return ServerConfiguration{
 		ListenAddress:    c.ListenAddress,
 		ListenPort:       c.ListenPort,
+		TLSCertFile:      c.TLSCertFile,
+		TLSKeyFile:       c.TLSKeyFile,
 		Username:         c.Username,
 		Password:         c.Password,
 		Camouflage:       c.Camouflage,

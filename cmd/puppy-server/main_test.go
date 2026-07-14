@@ -96,6 +96,26 @@ func TestLoadConfiguration(t *testing.T) {
 	}
 }
 
+func TestLoadConfiguration_TLSFrontend(t *testing.T) {
+	contents := strings.Replace(
+		validConfiguration,
+		"listen_port = 8081",
+		"listen_port = 8081\ntls_cert_file = \"proxy-cert.pem\"\ntls_key_file = \"proxy-key.pem\"",
+		1,
+	)
+	config, err := loadConfiguration(writeConfig(t, contents))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+	frontend, ok := config.Frontends["unused_proxy"].Configuration.(frontendhttpproxy.Configuration)
+	if !ok {
+		t.Fatalf("frontend configuration type = %T", config.Frontends["unused_proxy"].Configuration)
+	}
+	if frontend.TLSCertFile != "proxy-cert.pem" || frontend.TLSKeyFile != "proxy-key.pem" {
+		t.Fatalf("TLS files = (%q, %q)", frontend.TLSCertFile, frontend.TLSKeyFile)
+	}
+}
+
 func TestLoadConfigurationErrors(t *testing.T) {
 	tests := []struct {
 		name    string
