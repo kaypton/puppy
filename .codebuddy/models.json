@@ -1,0 +1,17 @@
+{
+  "models": [
+    {
+      "id": "GLM-5.2-Claude",
+      "name": "GLM-5.2-Claude",
+      "vendor": "PCL",
+      "apiKey": "sk-6zUoyjHAbOnv2nn1Hzy7KwsFBNOmIGXBjgrO3uQdszOUZFiZ",
+      "maxInputTokens": 128000,
+      "maxOutputTokens": 8192,
+      "url": "https://llmapi.pcl.ac.cn/v1",
+      "temperature": 0.7,
+      "supportsToolCall": true,
+      "supportsImages": true
+    }
+  ],
+  "availableModels": ["GLM-5.2-Claude"]
+}

@@ -1,0 +1,69 @@
+# Puppy 代理服务配置示例。
+#
+# frontend 指定要启动的 frontend 配置组名称。
+# 该值必须与下方 [frontends.<名称>] 中的一个名称完全一致。
+# 本示例默认启动 local_http_proxy；配置组名称可按需修改。
+frontend = "local_http_proxy"
+
+# HTTP CONNECT frontend 配置。
+# local_http_proxy 是用户自定义的配置组名称。
+[frontends.local_http_proxy]
+# type 决定该配置组使用哪一种 frontend 实现。
+# 当前支持的 frontend 类型：httpproxy。
+type = "httpproxy"
+
+# listen_address 是代理服务监听的本地 IP 地址。
+# 127.0.0.1 仅允许本机访问；如需接受外部连接可改为 0.0.0.0。
+listen_address = "127.0.0.1"
+
+# listen_port 是代理服务监听的 TCP 端口，取值范围为 1 到 65535。
+listen_port = 8848
+
+# username 是客户端连接此 HTTP 代理时使用的 Basic Auth 用户名。
+# username 和 password 必须同时填写或同时留空；同时留空表示不启用认证。
+username = "test"
+
+# password 是客户端连接此 HTTP 代理时使用的 Basic Auth 密码。
+# 生产环境启用认证时，请妥善限制此配置文件的读取权限。
+password = "test1234"
+
+# backend 指定此 frontend 使用的 backend 配置组名称。
+# 本示例使用 direct_out；如需通过上游 HTTP 代理转发，可改为 upstream_http_proxy。
+backend = "direct_out"
+
+# shim 指定此 frontend 使用的 shim 配置组名称。
+# 该值必须与下方 [shims.<名称>] 中的一个名称完全一致。
+shim = "default_tunnel"
+
+# Direct backend 配置。
+# direct_out 是用户自定义的配置组名称。
+[backends.direct_out]
+# type 决定该配置组使用哪一种 backend 实现。
+# direct 表示不经过其他代理，直接连接客户端请求的目标地址。
+type = "direct"
+
+# Direct backend 当前没有其他实现专属配置选项。
+
+# 上游 HTTP CONNECT proxy backend 配置。
+# 该配置组默认未被 local_http_proxy 使用，但会在启动时被严格校验。
+[backends.upstream_http_proxy]
+# type=httpproxy 表示通过另一个 HTTP CONNECT 代理连接最终目标。
+type = "httpproxy"
+
+# proxy_address 是上游 HTTP 代理的地址，必须使用 host:port 格式。
+# IPv6 地址需要使用方括号，例如 [2001:db8::1]:3128。
+proxy_address = "127.0.0.1:3128"
+
+# username 是连接上游 HTTP 代理时使用的 Basic Auth 用户名。
+# username 和 password 必须同时填写或同时留空；同时留空表示上游无需认证。
+username = ""
+
+# password 是连接上游 HTTP 代理时使用的 Basic Auth 密码。
+password = ""
+
+# Shim server 配置。
+# default_tunnel 是用户自定义的配置组名称，可被多个 frontend 复用。
+[shims.default_tunnel]
+# buffer_size 是隧道双向复制时，每个方向使用的缓冲区字节数。
+# 设置为 0 或省略该选项时使用内置默认值 32768（32 KiB）；负数无效。
+buffer_size = 32768
