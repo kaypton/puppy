@@ -116,6 +116,26 @@ func TestLoadConfiguration_TLSFrontend(t *testing.T) {
 	}
 }
 
+func TestLoadConfiguration_TLSBackend(t *testing.T) {
+	contents := strings.Replace(
+		validConfiguration,
+		`proxy_address = "proxy.example.com:3128"`,
+		`proxy_address = "proxy.example.com:3128"`+"\ntls = true\ntls_ca_file = \"./certs/ca-cert.pem\"\ntls_server_name = \"proxy.internal\"",
+		1,
+	)
+	config, err := loadConfiguration(writeConfig(t, contents))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+	backend, ok := config.Backends["corporate_proxy"].Configuration.(adapterhttpproxy.Configuration)
+	if !ok {
+		t.Fatalf("backend configuration type = %T", config.Backends["corporate_proxy"].Configuration)
+	}
+	if !backend.TLS || backend.TLSCAFile != "./certs/ca-cert.pem" || backend.TLSServerName != "proxy.internal" {
+		t.Fatalf("TLS backend = %#v", backend)
+	}
+}
+
 func TestLoadConfigurationErrors(t *testing.T) {
 	tests := []struct {
 		name    string

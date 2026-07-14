@@ -15,10 +15,18 @@ func TestConfigurationValidate(t *testing.T) {
 	}{
 		{"valid", Configuration{ProxyAddress: "proxy.example.com:3128"}, ""},
 		{"valid auth", Configuration{ProxyAddress: "proxy.example.com:3128", Username: "alice", Password: "secret"}, ""},
+		{"valid tls", Configuration{ProxyAddress: "proxy.example.com:3128", TLS: true}, ""},
+		{"valid tls with ca", Configuration{ProxyAddress: "proxy.example.com:3128", TLS: true, TLSCAFile: "./certs/ca-cert.pem"}, ""},
+		{"valid tls with server name", Configuration{ProxyAddress: "proxy.example.com:3128", TLS: true, TLSServerName: "proxy.internal"}, ""},
+		{"valid tls insecure", Configuration{ProxyAddress: "proxy.example.com:3128", TLS: true, TLSInsecureSkipVerify: true}, ""},
 		{"missing address", Configuration{}, "proxy_address is required"},
 		{"missing port", Configuration{ProxyAddress: "proxy.example.com"}, "host:port"},
 		{"zero port", Configuration{ProxyAddress: "proxy.example.com:0"}, "between 1 and 65535"},
 		{"unpaired credentials", Configuration{ProxyAddress: "proxy.example.com:3128", Username: "alice"}, "username and password"},
+		{"ca file without tls", Configuration{ProxyAddress: "proxy.example.com:3128", TLSCAFile: "./certs/ca-cert.pem"}, "require tls = true"},
+		{"server name without tls", Configuration{ProxyAddress: "proxy.example.com:3128", TLSServerName: "proxy.internal"}, "require tls = true"},
+		{"insecure without tls", Configuration{ProxyAddress: "proxy.example.com:3128", TLSInsecureSkipVerify: true}, "require tls = true"},
+		{"insecure with ca file", Configuration{ProxyAddress: "proxy.example.com:3128", TLS: true, TLSCAFile: "./certs/ca-cert.pem", TLSInsecureSkipVerify: true}, "mutually exclusive"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -39,13 +47,20 @@ func TestConfigurationValidate(t *testing.T) {
 func TestConfigurationBackendConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Configuration{
-		ProxyAddress: "proxy.example.com:3128",
-		Username:     "alice",
-		Password:     "secret",
+		ProxyAddress:          "proxy.example.com:3128",
+		Username:              "alice",
+		Password:              "secret",
+		TLS:                   true,
+		TLSCAFile:             "./certs/ca-cert.pem",
+		TLSServerName:         "proxy.internal",
+		TLSInsecureSkipVerify: false,
 	}
 	backendConfig := config.BackendConfig(logger)
 	if backendConfig.ProxyAddress != config.ProxyAddress || backendConfig.Username != config.Username || backendConfig.Password != config.Password {
 		t.Fatal("file configuration was not copied")
+	}
+	if backendConfig.TLS != config.TLS || backendConfig.TLSCAFile != config.TLSCAFile || backendConfig.TLSServerName != config.TLSServerName || backendConfig.TLSInsecureSkipVerify != config.TLSInsecureSkipVerify {
+		t.Fatalf("TLS configuration was not copied: %#v", backendConfig)
 	}
 	if backendConfig.Logger != logger {
 		t.Fatal("logger was not attached")

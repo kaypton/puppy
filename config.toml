@@ -76,6 +76,23 @@ username = ""
 # password 是连接上游 HTTP 代理时使用的 Basic Auth 密码。
 password = ""
 
+# tls 启用后，backend 将通过 TLS 连接上游 HTTP 代理（即 https_proxy=https://...）。
+# 省略或为 false 时仍使用明文 TCP。下面的 tls_* 字段仅在 tls = true 时有效。
+tls = false
+
+# tls_ca_file 指定用于校验上游代理服务器证书的 CA 文件（PEM 格式）。
+# 省略时使用系统根证书；可指向本地开发 CA，例如 ./certs/ca-cert.pem。
+# 与 tls_insecure_skip_verify 互斥。
+# tls_ca_file = "./certs/ca-cert.pem"
+
+# tls_server_name 覆盖 TLS SNI 与证书校验名。
+# 省略时取 proxy_address 的 host 部分。当上游证书 CN/SAN 与 proxy_address 不一致时使用。
+# tls_server_name = "proxy.internal"
+
+# tls_insecure_skip_verify 为 true 时跳过上游代理证书校验，仅用于测试。
+# 与 tls_ca_file 互斥。
+# tls_insecure_skip_verify = false
+
 # Shim server 配置。
 # default_tunnel 是用户自定义的配置组名称，可被多个 frontend 复用。
 [shims.default_tunnel]
