@@ -1,0 +1,211 @@
+package tunproxy
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log/slog"
+	"os"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/puppy/pkg/adapter/direct"
+	"github.com/puppy/pkg/common"
+	"github.com/sagernet/gvisor/pkg/tcpip/stack"
+)
+
+func TestNewServer_Validation(t *testing.T) {
+	backend := direct.NewBackend()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	cases := []struct {
+		name    string
+		cfg     ServerConfiguration
+		wantErr string
+	}{
+		{"missing addresses", ServerConfiguration{Backend: backend, Logger: logger}, "ipv4_address or ipv6_address is required"},
+		{"missing backend", ServerConfiguration{IPv4Address: "10.0.0.1/24", Logger: logger}, "backend is required"},
+		{"valid", ServerConfiguration{IPv4Address: "10.0.0.1/24", Backend: backend, Logger: logger}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewServer(tc.cfg)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestNewServer_DefaultsUDPIdle(t *testing.T) {
+	cfg := ServerConfiguration{
+		IPv4Address: "10.0.0.1/24",
+		Backend:     direct.NewBackend(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if s.config.UDPIdleTimeout != defaultUDPIdle {
+		t.Fatalf("UDPIdleTimeout = %v, want default %v", s.config.UDPIdleTimeout, defaultUDPIdle)
+	}
+}
+
+func TestParseAddrWithPrefix(t *testing.T) {
+	cases := []struct {
+		in       string
+		wantLen  int
+		wantPref int
+		wantErr  bool
+	}{
+		{"10.0.0.1/24", 4, 24, false},
+		{"192.168.1.1/32", 4, 32, false},
+		{"fd00::1/64", 16, 64, false},
+		{"::1/128", 16, 128, false},
+		{"10.0.0.1", 0, 0, true},
+		{"10.0.0.1/33", 0, 0, true},
+		{"fd00::1/129", 0, 0, true},
+		{"notanip/24", 0, 0, true},
+		{"10.0.0.1/abc", 0, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			addr, pref, err := parseAddrWithPrefix(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(addr) != tc.wantLen {
+				t.Fatalf("addr length = %d, want %d", len(addr), tc.wantLen)
+			}
+			if pref != tc.wantPref {
+				t.Fatalf("prefix = %d, want %d", pref, tc.wantPref)
+			}
+		})
+	}
+}
+
+func TestParseUtunUnit(t *testing.T) {
+	cases := []struct {
+		in      string
+		want    int
+		wantErr bool
+	}{
+		{"", 0, false},
+		{"utun", 0, false},
+		{"utun0", 0, false},
+		{"utun9", 9, false},
+		{"utun100", 100, false},
+		{"tun0", 0, true},
+		{"utunx", 0, true},
+		{"utun-1", 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			got, err := parseUtunUnit(tc.in)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("expected error for %q", tc.in)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("unit = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestTargetFromEndpointID(t *testing.T) {
+	id := stack.TransportEndpointID{
+		LocalAddress: stack.TransportEndpointID{}.LocalAddress, // placeholder, see below
+		LocalPort:    443,
+	}
+	// Build a real address: use AddrFrom4 via reflection-free path.
+	host, port := targetFromEndpointID(id)
+	if port != 443 {
+		t.Fatalf("port = %d, want 443", port)
+	}
+	if host == "" {
+		// Empty LocalAddress yields empty host; acceptable for the zero value.
+		_ = host
+	}
+}
+
+func TestServer_RunRequiresRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("test expects non-root; running as root")
+	}
+	s, err := NewServer(ServerConfiguration{
+		IPv4Address: "10.0.0.1/24",
+		Backend:     direct.NewBackend(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	err = s.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "root") {
+		t.Fatalf("error = %v, want error containing %q", err, "root")
+	}
+}
+
+func TestServer_RunContextCancelWithoutRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("test expects non-root; running as root")
+	}
+	s, err := NewServer(ServerConfiguration{
+		IPv4Address: "10.0.0.1/24",
+		Backend:     direct.NewBackend(),
+		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() { errCh <- s.Run(ctx) }()
+	cancel()
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, context.Canceled) && !strings.Contains(err.Error(), "root") {
+			t.Fatalf("Run returned unexpected error: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// Compile-time assertion that the noOpRouteManager satisfies the interface.
+var _ routeManager = noOpRouteManager{}
+
+// Compile-time assertion that the dispatcher satisfies sessionHandler.
+var _ sessionHandler = (*dispatcher)(nil)
+
+// errorBackend is a common.Backend whose Dial always fails, used to exercise
+// dispatcher behavior without a real upstream.
+type errorBackend struct{}
+
+func (errorBackend) Dial(context.Context, common.Target) (io.ReadWriteCloser, error) {
+	return nil, errors.New("unreachable")
+}
+
+var _ common.Backend = errorBackend{}

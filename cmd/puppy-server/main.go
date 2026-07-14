@@ -17,6 +17,7 @@ import (
 	"github.com/puppy/pkg/common"
 	frontendhttpproxy "github.com/puppy/pkg/httpproxy"
 	"github.com/puppy/pkg/shim"
+	frontendtunproxy "github.com/puppy/pkg/tunproxy"
 	"github.com/spf13/cobra"
 )
 
@@ -124,6 +125,12 @@ func loadConfiguration(path string) (*configuration, error) {
 				return nil, fmt.Errorf("decode frontend %q: %w", name, err)
 			}
 			config.Frontends[name] = frontendGroup{Type: kind.Type, Configuration: frontendConfig}
+		case frontendtunproxy.Type:
+			var frontendConfig frontendtunproxy.Configuration
+			if err := metadata.PrimitiveDecode(primitive, &frontendConfig); err != nil {
+				return nil, fmt.Errorf("decode frontend %q: %w", name, err)
+			}
+			config.Frontends[name] = frontendGroup{Type: kind.Type, Configuration: frontendConfig}
 		default:
 			return nil, fmt.Errorf("frontend %q: unknown type %q", name, kind.Type)
 		}
@@ -212,6 +219,20 @@ func (c *configuration) validate() error {
 			if _, ok := c.Shims[frontendConfig.Shim]; !ok {
 				return fmt.Errorf("frontend %q: shim %q does not exist", name, frontendConfig.Shim)
 			}
+		case frontendtunproxy.Type:
+			frontendConfig, ok := group.Configuration.(frontendtunproxy.Configuration)
+			if !ok {
+				return fmt.Errorf("frontend %q: configuration does not match type %q", name, group.Type)
+			}
+			if err := frontendConfig.Validate(); err != nil {
+				return fmt.Errorf("frontend %q: %w", name, err)
+			}
+			if _, ok := c.Backends[frontendConfig.Backend]; !ok {
+				return fmt.Errorf("frontend %q: backend %q does not exist", name, frontendConfig.Backend)
+			}
+			if _, ok := c.Shims[frontendConfig.Shim]; !ok {
+				return fmt.Errorf("frontend %q: shim %q does not exist", name, frontendConfig.Shim)
+			}
 		default:
 			return fmt.Errorf("frontend %q: unknown type %q", name, group.Type)
 		}
@@ -269,6 +290,21 @@ func buildFrontend(config *configuration, logger *slog.Logger) (frontendRunner, 
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
 		frontend, err := frontendhttpproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger))
+		if err != nil {
+			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
+		}
+		return frontend, nil
+	case frontendtunproxy.Type:
+		frontendConfig, ok := group.Configuration.(frontendtunproxy.Configuration)
+		if !ok {
+			return nil, fmt.Errorf("build frontend %q: configuration does not match type %q", config.Frontend, group.Type)
+		}
+		backend, err := buildBackend(config.Backends[frontendConfig.Backend], logger)
+		if err != nil {
+			return nil, fmt.Errorf("build backend %q: %w", frontendConfig.Backend, err)
+		}
+		shimConfig := config.Shims[frontendConfig.Shim]
+		frontend, err := frontendtunproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger))
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}

@@ -93,6 +93,42 @@ tls = false
 # 与 tls_ca_file 互斥。
 # tls_insecure_skip_verify = false
 
+# TUN 模式 frontend 配置（默认未启用，将上方 frontend 改为 local_tun 即可使用）。
+# TUN 模式会创建虚拟网卡接管系统默认路由，将本机全部 TCP/UDP 流量经 backend 转发。
+# 需要 root 权限运行：sudo bin/puppy-server --config ./config.toml。
+# 仅支持 macOS（utun）与 Linux（tun）。
+[frontends.local_tun]
+# type=tun 表示使用 TUN 模式 frontend。
+type = "tun"
+
+# device_name 指定虚拟网卡名称。留空时由系统自动分配（macOS: utunN, Linux: tunN）。
+# macOS 下可填 "utun5" 等指定具体 unit；Linux 下可填 "tun0" 等。
+device_name = ""
+
+# ipv4_address 是 TUN 网卡的 IPv4 地址，必须使用 CIDR 格式。必填。
+# 该地址仅作为虚拟网关，不与外部冲突即可，例如 10.0.0.1/24。
+ipv4_address = "10.0.0.1/24"
+
+# ipv6_address 可选，配置 TUN 网卡的 IPv6 地址，CIDR 格式。
+# ipv6_address = "fd00::1/64"
+
+# mtu 是虚拟网卡的最大传输单元，省略或为 0 时使用默认值 1500。
+mtu = 1500
+
+# auto_route 为 true（默认）时，启动会接管系统默认路由指向 TUN 网卡，
+# 退出时自动还原。设为 false 则由用户自行配置路由。
+auto_route = true
+
+# udp_idle_timeout 是 UDP 会话空闲超时秒数，超时后关闭该会话。
+# 省略或 <=0 时使用默认值 30 秒。
+udp_idle_timeout = 30
+
+# backend 指定此 frontend 使用的 backend 配置组名称。
+backend = "direct_out"
+
+# shim 指定此 frontend 使用的 shim 配置组名称。
+shim = "default_tunnel"
+
 # Shim server 配置。
 # default_tunnel 是用户自定义的配置组名称，可被多个 frontend 复用。
 [shims.default_tunnel]

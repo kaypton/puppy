@@ -13,6 +13,7 @@ import (
 	"github.com/puppy/pkg/adapter/direct"
 	adapterhttpproxy "github.com/puppy/pkg/adapter/httpproxy"
 	frontendhttpproxy "github.com/puppy/pkg/httpproxy"
+	frontendtunproxy "github.com/puppy/pkg/tunproxy"
 )
 
 const validConfiguration = `
@@ -35,6 +36,14 @@ listen_address = "127.0.0.1"
 listen_port = 8081
 backend = "corporate_proxy"
 shim = "large_tunnel"
+
+[frontends.unused_tun]
+type = "tun"
+ipv4_address = "10.0.0.1/24"
+mtu = 1500
+auto_route = false
+backend = "direct_out"
+shim = "default_tunnel"
 
 [backends.direct_out]
 type = "direct"
@@ -69,8 +78,8 @@ func TestLoadConfiguration(t *testing.T) {
 	if config.Frontend != "office_proxy" {
 		t.Fatalf("Frontend = %q, want office_proxy", config.Frontend)
 	}
-	if len(config.Frontends) != 2 || len(config.Backends) != 2 || len(config.Shims) != 2 {
-		t.Fatalf("group counts = (%d, %d, %d), want (2, 2, 2)", len(config.Frontends), len(config.Backends), len(config.Shims))
+	if len(config.Frontends) != 3 || len(config.Backends) != 2 || len(config.Shims) != 2 {
+		t.Fatalf("group counts = (%d, %d, %d), want (3, 2, 2)", len(config.Frontends), len(config.Backends), len(config.Shims))
 	}
 	frontendGroup := config.Frontends["office_proxy"]
 	frontend, ok := frontendGroup.Configuration.(frontendhttpproxy.Configuration)
@@ -93,6 +102,84 @@ func TestLoadConfiguration(t *testing.T) {
 	}
 	if got := config.Shims["large_tunnel"].BufferSize; got != 65536 {
 		t.Fatalf("large_tunnel buffer size = %d, want 65536", got)
+	}
+	tunGroup := config.Frontends["unused_tun"]
+	tun, ok := tunGroup.Configuration.(frontendtunproxy.Configuration)
+	if !ok {
+		t.Fatalf("tun frontend configuration type = %T", tunGroup.Configuration)
+	}
+	if tun.IPv4Address != "10.0.0.1/24" || tun.MTU != 1500 {
+		t.Fatalf("tun frontend = %#v", tun)
+	}
+	if tun.Backend != "direct_out" || tun.Shim != "default_tunnel" {
+		t.Fatalf("tun frontend references = (%q, %q), want (direct_out, default_tunnel)", tun.Backend, tun.Shim)
+	}
+	if tun.AutoRoute == nil || *tun.AutoRoute != false {
+		t.Fatalf("tun auto_route = %v, want false", tun.AutoRoute)
+	}
+}
+
+func TestLoadConfiguration_TunFrontendErrors(t *testing.T) {
+	cases := []struct {
+		name    string
+		config  string
+		wantErr string
+	}{
+		{
+			name: "tun missing address",
+			config: `
+frontend = "t"
+[frontends.t]
+type = "tun"
+backend = "out"
+shim = "s"
+[backends.out]
+type = "direct"
+[shims.s]
+`,
+			wantErr: `frontend "t": ipv4_address or ipv6_address is required`,
+		},
+		{
+			name: "tun invalid cidr",
+			config: `
+frontend = "t"
+[frontends.t]
+type = "tun"
+ipv4_address = "10.0.0.1"
+backend = "out"
+shim = "s"
+[backends.out]
+type = "direct"
+[shims.s]
+`,
+			wantErr: `frontend "t": ipv4_address must be in CIDR form`,
+		},
+		{
+			name: "tun missing backend reference",
+			config: `
+frontend = "t"
+[frontends.t]
+type = "tun"
+ipv4_address = "10.0.0.1/24"
+backend = "missing"
+shim = "s"
+[backends.out]
+type = "direct"
+[shims.s]
+`,
+			wantErr: `frontend "t": backend "missing" does not exist`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := loadConfiguration(writeConfig(t, tc.config))
+			if err == nil {
+				t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %q, want substring %q", err, tc.wantErr)
+			}
+		})
 	}
 }
 
