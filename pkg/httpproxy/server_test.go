@@ -110,6 +110,7 @@ func TestNewServer_Validation(t *testing.T) {
 		{"missing backend", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1}, "backend is required"},
 		{"username only", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend, Username: "u"}, "username and password"},
 		{"password only", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend, Password: "p"}, "username and password"},
+		{"unknown camouflage method", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend, CamouflageMethod: "unknown"}, "unsupported camouflage method"},
 		{"valid open", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend}, ""},
 		{"valid authed", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend, Username: "u", Password: "p"}, ""},
 	}
@@ -129,6 +130,20 @@ func TestNewServer_Validation(t *testing.T) {
 				t.Fatalf("error = %q, want substring %q", err.Error(), tc.wantErr)
 			}
 		})
+	}
+}
+
+func TestNewServer_DefaultsCamouflageMethod(t *testing.T) {
+	s, err := NewServer(ServerConfiguration{
+		ListenAddress: "127.0.0.1",
+		ListenPort:    8080,
+		Backend:       direct.NewBackend(),
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if s.config.CamouflageMethod != Return404 {
+		t.Fatalf("CamouflageMethod = %q, want %q", s.config.CamouflageMethod, Return404)
 	}
 }
 
@@ -259,6 +274,38 @@ func TestServer_AuthRequired_407(t *testing.T) {
 	}
 	if got := resp.Header.Get("Proxy-Authenticate"); !strings.Contains(got, "Basic") {
 		t.Fatalf("Proxy-Authenticate = %q, want Basic", got)
+	}
+}
+
+func TestServer_CamouflageAuthFailure_405(t *testing.T) {
+	cfg := ServerConfiguration{
+		Username:   "alice",
+		Password:   "secret",
+		Camouflage: true,
+	}
+	proxyAddr, _, _ := startServer(t, cfg, direct.NewBackend())
+
+	conn, err := net.Dial("tcp", proxyAddr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := io.WriteString(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Allow"); got != "GET, HEAD" {
+		t.Fatalf("Allow = %q, want GET, HEAD", got)
+	}
+	if got := resp.Header.Get("Proxy-Authenticate"); got != "" {
+		t.Fatalf("Proxy-Authenticate = %q, want empty", got)
 	}
 }
 

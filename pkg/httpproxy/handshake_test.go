@@ -163,6 +163,31 @@ func TestHandshake_NonConnectMethod(t *testing.T) {
 	}
 }
 
+func TestHandshake_CamouflageNonConnectMethod(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Camouflage = true
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	clientConn, serverConn := newPipeConns(t)
+	wait := dialHandshake(t, s, serverConn)
+
+	if _, err := io.WriteString(clientConn, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"); err != nil {
+		t.Fatalf("write GET: %v", err)
+	}
+	if _, _, err := wait(); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	status, headers := readResponse(t, clientConn)
+	if !strings.Contains(status, "404") {
+		t.Fatalf("status = %q, want 404", status)
+	}
+	if got := headers.Get("Proxy-Authenticate"); got != "" {
+		t.Fatalf("Proxy-Authenticate = %q, want empty", got)
+	}
+}
+
 func TestHandshake_MalformedRequest(t *testing.T) {
 	s, err := NewServer(baseConfig())
 	if err != nil {
@@ -242,10 +267,77 @@ func TestHandshake_AuthWrong(t *testing.T) {
 	}
 }
 
+func TestHandshake_CamouflageAuthFailures(t *testing.T) {
+	tests := []struct {
+		name   string
+		header string
+	}{
+		{name: "missing"},
+		{name: "malformed", header: "Proxy-Authorization: Basic not-base64!\r\n"},
+		{name: "wrong", header: "Proxy-Authorization: Basic " + base64.StdEncoding.EncodeToString([]byte("alice:wrong")) + "\r\n"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := baseConfig()
+			cfg.Username = "alice"
+			cfg.Password = "secret"
+			cfg.Camouflage = true
+			s, err := NewServer(cfg)
+			if err != nil {
+				t.Fatalf("NewServer: %v", err)
+			}
+			clientConn, serverConn := newPipeConns(t)
+			wait := dialHandshake(t, s, serverConn)
+
+			request := "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n" + test.header + "\r\n"
+			if _, err := io.WriteString(clientConn, request); err != nil {
+				t.Fatalf("write CONNECT: %v", err)
+			}
+			if _, _, err := wait(); err == nil {
+				t.Fatal("expected error, got nil")
+			}
+			status, headers := readResponse(t, clientConn)
+			if !strings.Contains(status, "405") {
+				t.Fatalf("status = %q, want 405", status)
+			}
+			if got := headers.Get("Allow"); got != "GET, HEAD" {
+				t.Fatalf("Allow = %q, want GET, HEAD", got)
+			}
+			if got := headers.Get("Proxy-Authenticate"); got != "" {
+				t.Fatalf("Proxy-Authenticate = %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestHandshake_CamouflageMalformedRequest(t *testing.T) {
+	cfg := baseConfig()
+	cfg.Camouflage = true
+	s, err := NewServer(cfg)
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	clientConn, serverConn := newPipeConns(t)
+	wait := dialHandshake(t, s, serverConn)
+
+	if _, err := io.WriteString(clientConn, "this is not http\r\n\r\n"); err != nil {
+		t.Fatalf("write garbage: %v", err)
+	}
+	if _, _, err := wait(); err == nil {
+		t.Fatal("expected error, got nil")
+	}
+	status, _ := readResponse(t, clientConn)
+	if !strings.Contains(status, "400") {
+		t.Fatalf("status = %q, want 400", status)
+	}
+}
+
 func TestHandshake_AuthCorrect(t *testing.T) {
 	cfg := baseConfig()
 	cfg.Username = "alice"
 	cfg.Password = "secret"
+	cfg.Camouflage = true
 	s, err := NewServer(cfg)
 	if err != nil {
 		t.Fatalf("NewServer: %v", err)

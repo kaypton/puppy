@@ -46,14 +46,22 @@ func (s *Server) handshake(conn net.Conn) (target common.Target, frontend io.Rea
 	}
 
 	if req.Method != http.MethodConnect {
-		s.writeError(conn, httpStatusMethodNotAllowed, nil)
+		if s.config.Camouflage {
+			s.writeCamouflageError(conn, false)
+		} else {
+			s.writeError(conn, httpStatusMethodNotAllowed, nil)
+		}
 		return common.Target{}, nil, fmt.Errorf("method not allowed: %s", req.Method)
 	}
 
 	if s.config.Username != "" && !s.checkAuth(req) {
-		s.writeError(conn, httpStatusProxyAuthRequired, map[string]string{
-			"Proxy-Authenticate": `Basic realm="proxy"`,
-		})
+		if s.config.Camouflage {
+			s.writeCamouflageError(conn, true)
+		} else {
+			s.writeError(conn, httpStatusProxyAuthRequired, map[string]string{
+				"Proxy-Authenticate": `Basic realm="proxy"`,
+			})
+		}
 		return common.Target{}, nil, errors.New("authentication failed")
 	}
 
@@ -79,6 +87,21 @@ func (s *Server) handshake(conn net.Conn) (target common.Target, frontend io.Rea
 	}
 
 	return common.Target{Network: "tcp", Host: host, Port: uint16(port)}, &bufferedConn{r: reader, Conn: conn}, nil
+}
+
+// writeCamouflageError makes rejected requests resemble responses from a
+// normal HTTP service instead of exposing proxy-specific behavior.
+func (s *Server) writeCamouflageError(conn net.Conn, connectMethod bool) {
+	switch s.config.CamouflageMethod {
+	case Return404:
+		if connectMethod {
+			s.writeError(conn, httpStatusMethodNotAllowed, map[string]string{
+				"Allow": "GET, HEAD",
+			})
+			return
+		}
+		s.writeError(conn, http.StatusNotFound, nil)
+	}
 }
 
 // checkAuth validates the Proxy-Authorization header against the configured

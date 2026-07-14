@@ -14,6 +14,15 @@ import (
 	"github.com/puppy/pkg/shim"
 )
 
+// CamouflageMethod identifies how the server disguises rejected requests.
+type CamouflageMethod string
+
+const (
+	// Return404 makes the frontend resemble an HTTP service whose resources do
+	// not exist and which does not support CONNECT without valid credentials.
+	Return404 CamouflageMethod = "return-404"
+)
+
 // ServerConfiguration configures an HTTP CONNECT proxy server.
 type ServerConfiguration struct {
 	ListenAddress string
@@ -30,6 +39,10 @@ type ServerConfiguration struct {
 	ShimBufferSize int
 	// Logger receives structured log events. When nil, slog.Default() is used.
 	Logger *slog.Logger
+	// Camouflage hides proxy-specific responses from unauthenticated clients.
+	Camouflage bool
+	// CamouflageMethod selects the disguise. Empty defaults to Return404.
+	CamouflageMethod CamouflageMethod
 }
 
 // Server is an HTTP CONNECT proxy that fronts a ShimServer per connection.
@@ -53,11 +66,22 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	if (config.Username == "") != (config.Password == "") {
 		return nil, errors.New("httpproxy: username and password must both be set or both be empty")
 	}
+	config.CamouflageMethod = normalizeCamouflageMethod(config.CamouflageMethod)
+	if config.CamouflageMethod != Return404 {
+		return nil, fmt.Errorf("httpproxy: unsupported camouflage method %q", config.CamouflageMethod)
+	}
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Server{config: config, logger: logger, backend: config.Backend}, nil
+}
+
+func normalizeCamouflageMethod(method CamouflageMethod) CamouflageMethod {
+	if method == "" {
+		return Return404
+	}
+	return method
 }
 
 // Run listens and accepts connections until ctx is cancelled. It returns nil

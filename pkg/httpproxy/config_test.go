@@ -28,6 +28,7 @@ func TestConfigurationValidate(t *testing.T) {
 		{"missing address", func(c *Configuration) { c.ListenAddress = "" }, "listen_address"},
 		{"missing port", func(c *Configuration) { c.ListenPort = 0 }, "listen_port"},
 		{"unpaired credentials", func(c *Configuration) { c.Username = "alice" }, "username and password"},
+		{"unknown camouflage method", func(c *Configuration) { c.CamouflageMethod = "unknown" }, "camouflage_method"},
 		{"missing backend", func(c *Configuration) { c.Backend = "" }, "backend reference"},
 		{"missing shim", func(c *Configuration) { c.Shim = "" }, "shim reference"},
 	}
@@ -47,12 +48,14 @@ func TestConfigurationServerConfig(t *testing.T) {
 	backend := direct.NewBackend()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	config := Configuration{
-		ListenAddress: "127.0.0.1",
-		ListenPort:    8080,
-		Username:      "alice",
-		Password:      "secret",
-		Backend:       "out",
-		Shim:          "tunnel",
+		ListenAddress:    "127.0.0.1",
+		ListenPort:       8080,
+		Username:         "alice",
+		Password:         "secret",
+		Camouflage:       true,
+		CamouflageMethod: Return404,
+		Backend:          "out",
+		Shim:             "tunnel",
 	}
 
 	serverConfig := config.ServerConfig(backend, 65536, logger)
@@ -62,7 +65,18 @@ func TestConfigurationServerConfig(t *testing.T) {
 	if serverConfig.Username != config.Username || serverConfig.Password != config.Password {
 		t.Fatal("credentials were not copied")
 	}
+	if !serverConfig.Camouflage || serverConfig.CamouflageMethod != Return404 {
+		t.Fatal("camouflage configuration was not copied")
+	}
 	if serverConfig.Backend != backend || serverConfig.ShimBufferSize != 65536 || serverConfig.Logger != logger {
 		t.Fatal("runtime dependencies were not attached")
+	}
+}
+
+func TestConfigurationServerConfig_DefaultsCamouflageMethod(t *testing.T) {
+	config := Configuration{}
+	serverConfig := config.ServerConfig(direct.NewBackend(), 0, nil)
+	if serverConfig.CamouflageMethod != Return404 {
+		t.Fatalf("CamouflageMethod = %q, want %q", serverConfig.CamouflageMethod, Return404)
 	}
 }

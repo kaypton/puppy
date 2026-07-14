@@ -24,6 +24,8 @@ listen_address = "127.0.0.1"
 listen_port = 8080
 username = "alice"
 password = "secret"
+camouflage = true
+camouflage_method = "return-404"
 backend = "direct_out"
 shim = "default_tunnel"
 
@@ -77,6 +79,9 @@ func TestLoadConfiguration(t *testing.T) {
 	}
 	if frontend.Backend != "direct_out" || frontend.Shim != "default_tunnel" {
 		t.Fatalf("frontend references = (%q, %q), want (direct_out, default_tunnel)", frontend.Backend, frontend.Shim)
+	}
+	if !frontend.Camouflage || frontend.CamouflageMethod != frontendhttpproxy.Return404 {
+		t.Fatalf("frontend camouflage = (%t, %q), want (true, return-404)", frontend.Camouflage, frontend.CamouflageMethod)
 	}
 	backendGroup := config.Backends["corporate_proxy"]
 	backend, ok := backendGroup.Configuration.(adapterhttpproxy.Configuration)
@@ -170,6 +175,11 @@ proxy_address = "proxy.example.com:3128"`, 1),
 			name:    "unpaired frontend credentials",
 			config:  strings.Replace(validConfiguration, `password = "secret"`, `password = ""`, 1),
 			wantErr: `frontend "office_proxy": username and password`,
+		},
+		{
+			name:    "unknown camouflage method",
+			config:  strings.Replace(validConfiguration, `camouflage_method = "return-404"`, `camouflage_method = "unknown"`, 1),
+			wantErr: `frontend "office_proxy": camouflage_method`,
 		},
 		{
 			name:    "invalid unused proxy address",
