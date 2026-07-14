@@ -179,11 +179,28 @@ func TestHandshake_CamouflageNonConnectMethod(t *testing.T) {
 	if _, _, err := wait(); err == nil {
 		t.Fatal("expected error, got nil")
 	}
-	status, headers := readResponse(t, clientConn)
-	if !strings.Contains(status, "404") {
-		t.Fatalf("status = %q, want 404", status)
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
 	}
-	if got := headers.Get("Proxy-Authenticate"); got != "" {
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "text/html" {
+		t.Fatalf("Content-Type = %q, want text/html", got)
+	}
+	if got := resp.Header.Get("Server"); got != "nginx" {
+		t.Fatalf("Server = %q, want nginx", got)
+	}
+	if !strings.Contains(string(body), "<h1>404 Not Found</h1>") || !strings.Contains(string(body), "<center>nginx</center>") {
+		t.Fatalf("body = %q, want nginx-style 404 page", body)
+	}
+	if got := resp.Header.Get("Proxy-Authenticate"); got != "" {
 		t.Fatalf("Proxy-Authenticate = %q, want empty", got)
 	}
 }

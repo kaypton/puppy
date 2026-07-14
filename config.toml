@@ -25,7 +25,7 @@ username = "test"
 
 # password 是客户端连接此 HTTP 代理时使用的 Basic Auth 密码。
 # 生产环境启用认证时，请妥善限制此配置文件的读取权限。
-password = "test1234"
+password = "test12345"
 
 # camouflage 启用后，服务会隐藏代理专用的认证失败响应。
 # 普通 HTTP 请求将得到 404，认证失败的 CONNECT 请求将得到 405。

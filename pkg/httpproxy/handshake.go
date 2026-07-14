@@ -22,6 +22,7 @@ const (
 	httpStatusMethodNotAllowed  = http.StatusMethodNotAllowed
 	httpStatusProxyAuthRequired = http.StatusProxyAuthRequired
 	httpStatusBadGateway        = http.StatusBadGateway
+	notFoundHtml                = "<html>\r\n<head><title>404 Not Found</title></head>\r\n<body>\r\n<center><h1>404 Not Found</h1></center>\r\n<hr><center>nginx</center>\r\n</body>\r\n</html>\r\n"
 )
 
 // bufferedConn preserves bytes that bufio.Reader has already pulled past the
@@ -100,7 +101,9 @@ func (s *Server) writeCamouflageError(conn net.Conn, connectMethod bool) {
 			})
 			return
 		}
-		s.writeError(conn, http.StatusNotFound, nil)
+		s.writeResponse(conn, http.StatusNotFound, map[string]string{
+			"Content-Type": "text/html",
+		}, notFoundHtml)
 	}
 }
 
@@ -142,6 +145,10 @@ func proxyBasicAuth(req *http.Request) (username, password string, ok bool) {
 // Extra headers (e.g. Proxy-Authenticate) are optional.
 func (s *Server) writeError(conn net.Conn, code int, headers map[string]string) {
 	body := http.StatusText(code) + "\n"
+	s.writeResponse(conn, code, headers, body)
+}
+
+func (s *Server) writeResponse(conn net.Conn, code int, headers map[string]string, body string) {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "HTTP/1.1 %d %s\r\n", code, http.StatusText(code))
 	for k, v := range headers {
