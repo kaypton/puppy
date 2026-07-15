@@ -43,7 +43,8 @@ camouflage = true
 camouflage_method = "return-404"
 
 # backend 指定此 frontend 使用的 backend 配置组名称。
-# 本示例使用 direct_out；如需通过上游 HTTP 代理转发，可改为 upstream_http_proxy。
+# 本示例使用 direct_out；如需通过上游 HTTP 代理转发，可改为 upstream_http_proxy；
+# 如需通过上游 SOCKS5 代理转发，可改为 upstream_socks_proxy。
 backend = "direct_out"
 
 # shim 指定此 frontend 使用的 shim 配置组名称。
@@ -77,6 +78,40 @@ username = ""
 password = ""
 
 # tls 启用后，backend 将通过 TLS 连接上游 HTTP 代理（即 https_proxy=https://...）。
+# 省略或为 false 时仍使用明文 TCP。下面的 tls_* 字段仅在 tls = true 时有效。
+tls = false
+
+# tls_ca_file 指定用于校验上游代理服务器证书的 CA 文件（PEM 格式）。
+# 省略时使用系统根证书；可指向本地开发 CA，例如 ./certs/ca-cert.pem。
+# 与 tls_insecure_skip_verify 互斥。
+# tls_ca_file = "./certs/ca-cert.pem"
+
+# tls_server_name 覆盖 TLS SNI 与证书校验名。
+# 省略时取 proxy_address 的 host 部分。当上游证书 CN/SAN 与 proxy_address 不一致时使用。
+# tls_server_name = "proxy.internal"
+
+# tls_insecure_skip_verify 为 true 时跳过上游代理证书校验，仅用于测试。
+# 与 tls_ca_file 互斥。
+# tls_insecure_skip_verify = false
+
+# 上游 SOCKS5 proxy backend 配置。
+# 该配置组默认未被 local_http_proxy 使用，但会在启动时被严格校验。
+[backends.upstream_socks_proxy]
+# type=socksproxy 表示通过一个上游 SOCKS5 代理连接最终目标。
+type = "socksproxy"
+
+# proxy_address 是上游 SOCKS5 代理的地址，必须使用 host:port 格式。
+# IPv6 地址需要使用方括号，例如 [2001:db8::1]:1080。
+proxy_address = "127.0.0.1:1080"
+
+# username 是连接上游 SOCKS5 代理时使用的用户名（RFC 1929 用户名/密码认证）。
+# username 和 password 必须同时填写或同时留空；同时留空表示上游无需认证。
+username = ""
+
+# password 是连接上游 SOCKS5 代理时使用的密码。
+password = ""
+
+# tls 启用后，backend 将通过 TLS 连接上游 SOCKS5 代理。
 # 省略或为 false 时仍使用明文 TCP。下面的 tls_* 字段仅在 tls = true 时有效。
 tls = false
 

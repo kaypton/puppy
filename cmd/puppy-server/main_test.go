@@ -12,6 +12,7 @@ import (
 
 	"github.com/puppy/pkg/adapter/direct"
 	adapterhttpproxy "github.com/puppy/pkg/adapter/httpproxy"
+	adaptersocksproxy "github.com/puppy/pkg/adapter/socksproxy"
 	frontendhttpproxy "github.com/puppy/pkg/httpproxy"
 	frontendtunproxy "github.com/puppy/pkg/tunproxy"
 )
@@ -55,6 +56,12 @@ proxy_address = "proxy.example.com:3128"
 username = "bob"
 password = "password"
 
+[backends.corporate_socks]
+type = "socksproxy"
+proxy_address = "socks.example.com:1080"
+username = "carol"
+password = "swordfish"
+
 [shims.default_tunnel]
 buffer_size = 32768
 
@@ -79,8 +86,8 @@ func TestLoadConfiguration(t *testing.T) {
 	if config.Frontend != "office_proxy" {
 		t.Fatalf("Frontend = %q, want office_proxy", config.Frontend)
 	}
-	if len(config.Frontends) != 3 || len(config.Backends) != 2 || len(config.Shims) != 2 {
-		t.Fatalf("group counts = (%d, %d, %d), want (3, 2, 2)", len(config.Frontends), len(config.Backends), len(config.Shims))
+	if len(config.Frontends) != 3 || len(config.Backends) != 3 || len(config.Shims) != 2 {
+		t.Fatalf("group counts = (%d, %d, %d), want (3, 3, 2)", len(config.Frontends), len(config.Backends), len(config.Shims))
 	}
 	frontendGroup := config.Frontends["office_proxy"]
 	frontend, ok := frontendGroup.Configuration.(frontendhttpproxy.Configuration)
@@ -100,6 +107,14 @@ func TestLoadConfiguration(t *testing.T) {
 	}
 	if backend.ProxyAddress != "proxy.example.com:3128" || backend.Username != "bob" {
 		t.Fatalf("HTTP backend = %#v", backend)
+	}
+	socksBackendGroup := config.Backends["corporate_socks"]
+	socksBackend, ok := socksBackendGroup.Configuration.(adaptersocksproxy.Configuration)
+	if !ok {
+		t.Fatalf("socks backend configuration type = %T", socksBackendGroup.Configuration)
+	}
+	if socksBackend.ProxyAddress != "socks.example.com:1080" || socksBackend.Username != "carol" || socksBackend.Password != "swordfish" {
+		t.Fatalf("SOCKS backend = %#v", socksBackend)
 	}
 	if got := config.Shims["large_tunnel"].BufferSize; got != 65536 {
 		t.Fatalf("large_tunnel buffer size = %d, want 65536", got)
@@ -409,6 +424,19 @@ func TestBuildBackend(t *testing.T) {
 	}
 	if _, ok := httpBackend.(*adapterhttpproxy.Backend); !ok {
 		t.Fatalf("HTTP backend type = %T", httpBackend)
+	}
+
+	socksBackend, err := buildBackend(backendGroup{
+		Type: adaptersocksproxy.Type,
+		Configuration: adaptersocksproxy.Configuration{
+			ProxyAddress: "socks.example.com:1080",
+		},
+	}, logger)
+	if err != nil {
+		t.Fatalf("build SOCKS backend: %v", err)
+	}
+	if _, ok := socksBackend.(*adaptersocksproxy.Backend); !ok {
+		t.Fatalf("SOCKS backend type = %T", socksBackend)
 	}
 }
 

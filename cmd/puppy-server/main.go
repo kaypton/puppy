@@ -14,6 +14,7 @@ import (
 	"github.com/BurntSushi/toml"
 	"github.com/puppy/pkg/adapter/direct"
 	adapterhttpproxy "github.com/puppy/pkg/adapter/httpproxy"
+	adaptersocksproxy "github.com/puppy/pkg/adapter/socksproxy"
 	"github.com/puppy/pkg/common"
 	frontendhttpproxy "github.com/puppy/pkg/httpproxy"
 	"github.com/puppy/pkg/shim"
@@ -155,6 +156,12 @@ func loadConfiguration(path string) (*configuration, error) {
 				return nil, fmt.Errorf("decode backend %q: %w", name, err)
 			}
 			config.Backends[name] = backendGroup{Type: kind.Type, Configuration: backendConfig}
+		case adaptersocksproxy.Type:
+			var backendConfig adaptersocksproxy.Configuration
+			if err := metadata.PrimitiveDecode(primitive, &backendConfig); err != nil {
+				return nil, fmt.Errorf("decode backend %q: %w", name, err)
+			}
+			config.Backends[name] = backendGroup{Type: kind.Type, Configuration: backendConfig}
 		default:
 			return nil, fmt.Errorf("backend %q: unknown type %q", name, kind.Type)
 		}
@@ -267,6 +274,14 @@ func (c *configuration) validate() error {
 			if err := backendConfig.Validate(); err != nil {
 				return fmt.Errorf("backend %q: %w", name, err)
 			}
+		case adaptersocksproxy.Type:
+			backendConfig, ok := group.Configuration.(adaptersocksproxy.Configuration)
+			if !ok {
+				return fmt.Errorf("backend %q: configuration does not match type %q", name, group.Type)
+			}
+			if err := backendConfig.Validate(); err != nil {
+				return fmt.Errorf("backend %q: %w", name, err)
+			}
 		default:
 			return fmt.Errorf("backend %q: unknown type %q", name, group.Type)
 		}
@@ -347,6 +362,12 @@ func buildBackend(group backendGroup, logger *slog.Logger) (common.Backend, erro
 			return nil, fmt.Errorf("configuration does not match type %q", group.Type)
 		}
 		return adapterhttpproxy.NewBackend(backendConfig.BackendConfig(logger))
+	case adaptersocksproxy.Type:
+		backendConfig, ok := group.Configuration.(adaptersocksproxy.Configuration)
+		if !ok {
+			return nil, fmt.Errorf("configuration does not match type %q", group.Type)
+		}
+		return adaptersocksproxy.NewBackend(backendConfig.BackendConfig(logger))
 	default:
 		return nil, fmt.Errorf("unsupported type %q", group.Type)
 	}

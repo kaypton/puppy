@@ -12,6 +12,7 @@ Puppy 是一个用 Go 编写的代理服务，支持两种工作模式：
 - HTTP CONNECT 代理，可选 TLS（HTTPS 代理）与 Basic Auth 认证
 - 伪装模式：未认证请求返回 404，使代理端口看起来像普通 Web 服务
 - 上游 HTTP CONNECT 代理链式转发（可选 TLS 到上游）
+- 上游 SOCKS5 代理链式转发（可选 TLS 到上游）
 - TUN 模式整机接管，支持 TCP/UDP，自动安装/恢复路由
 - DNS 重定向：将 53 端口流量改发到指定解析器，UDP 查询自动转为 DNS-over-TCP
 - 严格的 TOML 校验，未知字段直接报错，避免配置失误
@@ -104,7 +105,35 @@ password      = ""
 tls           = false     # 上游支持 HTTPS 时设为 true
 ```
 
-### 3. TUN 全局代理 → 直连
+### 3. 本地 HTTP 代理 → 上游 SOCKS5 代理
+
+puppy 在客户端与上游 SOCKS5 代理之间再加一层，可在本地加 TLS、认证或伪装。仅支持 TCP（SOCKS5 CONNECT）。
+
+适用场景：
+
+- 上游是公司/学校提供的 SOCKS5 代理，但你想在本地用不带认证的工具
+- 想给上游 SOCKS5 连接套上 TLS（自建上游时）
+- 用伪装模式隐藏上游代理的存在
+
+```toml
+frontend = "local_http_proxy"
+
+[frontends.local_http_proxy]
+type            = "httpproxy"
+listen_address  = "127.0.0.1"
+listen_port     = 8848
+backend         = "upstream_socks_proxy"
+shim            = "default_tunnel"
+
+[backends.upstream_socks_proxy]
+type          = "socksproxy"
+proxy_address = "10.0.0.2:1080"
+username      = ""        # 上游如需认证再填
+password      = ""
+tls           = false     # 上游为 TLS 端口时设为 true
+```
+
+### 4. TUN 全局代理 → 直连
 
 puppy 创建虚拟网卡接管整机流量，按系统默认路由表直连目标。**需要 root 权限**，仅支持 macOS 与 Linux。
 
@@ -137,7 +166,7 @@ type = "direct"
 sudo bin/puppy-server --config ./config.toml
 ```
 
-### 4. TUN 全局代理 → 上游 HTTP 代理
+### 5. TUN 全局代理 → 上游 HTTP 代理
 
 整机流量经上游 HTTP 代理转发。注意：HTTP CONNECT 只能承载 TCP，UDP 会落到 `fallback`（通常配置为 `direct` 直连）。
 
@@ -172,8 +201,10 @@ type = "direct"
 |------|----------|---------|
 | 浏览器/curl 等使用，直连目标 | `httpproxy` | `direct` |
 | 浏览器/curl 等使用，走上游 HTTP 代理 | `httpproxy` | `httpproxy` |
+| 浏览器/curl 等使用，走上游 SOCKS5 代理 | `httpproxy` | `socksproxy` |
 | 整机透明代理，直连目标（含 UDP） | `tun` | `direct` |
 | 整机透明代理，走上游 HTTP 代理（仅 TCP） | `tun` | `httpproxy` + `direct` fallback |
+| 整机透明代理，走上游 SOCKS5 代理（仅 TCP） | `tun` | `socksproxy` + `direct` fallback |
 
 ## 配置说明
 
@@ -252,6 +283,23 @@ type = "direct"
 | `username` | 否 | 上游 Basic Auth 用户名，必须与 `password` 同时填写或同时留空 |
 | `password` | 否 | 上游 Basic Auth 密码 |
 | `tls` | 否 | `true` 时通过 TLS 连接上游（即 `https_proxy=https://...`） |
+| `tls_ca_file` | 否 | 校验上游证书的 CA 文件（PEM），默认系统根证书；与 `tls_insecure_skip_verify` 互斥 |
+| `tls_server_name` | 否 | 覆盖 TLS SNI 与证书校验名 |
+| `tls_insecure_skip_verify` | 否 | `true` 跳过证书校验，仅用于测试；与 `tls_ca_file` 互斥 |
+
+`tls_*` 字段仅在 `tls = true` 时有效。
+
+### `[backends.<名称>]` —— `type = "socksproxy"`
+
+通过上游 SOCKS5 代理转发（CONNECT）。仅支持 TCP；认证方式为 RFC 1929 用户名/密码或无认证。
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `type` | 是 | 固定为 `socksproxy` |
+| `proxy_address` | 是 | 上游代理地址，`host:port` 格式（IPv6 用 `[::1]:1080`） |
+| `username` | 否 | 上游 SOCKS5 用户名，必须与 `password` 同时填写或同时留空 |
+| `password` | 否 | 上游 SOCKS5 密码 |
+| `tls` | 否 | `true` 时通过 TLS 连接上游 SOCKS5 代理 |
 | `tls_ca_file` | 否 | 校验上游证书的 CA 文件（PEM），默认系统根证书；与 `tls_insecure_skip_verify` 互斥 |
 | `tls_server_name` | 否 | 覆盖 TLS SNI 与证书校验名 |
 | `tls_insecure_skip_verify` | 否 | `true` 跳过证书校验，仅用于测试；与 `tls_ca_file` 互斥 |
