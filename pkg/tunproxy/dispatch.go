@@ -93,28 +93,30 @@ func (d *dispatcher) HandleUDP(req *udp.ForwarderRequest) {
 	id := req.ID()
 	host, port := targetFromEndpointID(id)
 	target := common.Target{Network: "udp", Host: host, Port: port}
+	// Register the endpoint before returning from the forwarder callback. If
+	// backend dialing happens first, subsequent datagrams for the same flow can
+	// trigger additional ForwarderRequests and race to bind the same port.
+	frontend, err := d.ns.endpointFromUDPRequest(req)
+	if err != nil {
+		d.logger.Info("tunproxy: udp endpoint creation failed", "target", target.Address(), "err", err)
+		return
+	}
 
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
-		d.serveUDP(req, target)
+		d.serveUDP(frontend, target)
 	}()
 }
 
-func (d *dispatcher) serveUDP(req *udp.ForwarderRequest, target common.Target) {
+func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target) {
+	defer frontend.Close()
 	upstream, err := d.backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
 		d.logger.Info("tunproxy: udp backend dial failed", "target", target.Address(), "err", err)
 		return
 	}
 	defer upstream.Close()
-
-	frontend, err := d.ns.endpointFromUDPRequest(req)
-	if err != nil {
-		d.logger.Info("tunproxy: udp endpoint creation failed", "target", target.Address(), "err", err)
-		return
-	}
-	defer frontend.Close()
 
 	d.logger.Info("tunproxy: udp tunnel established", "target", target.Address())
 
