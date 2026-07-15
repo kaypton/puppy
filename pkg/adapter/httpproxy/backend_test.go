@@ -172,7 +172,7 @@ func TestBackend_ChainThroughHTTPProxy(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	conn, err := b.Dial(context.Background(), parseTarget(echoAddr))
+	conn, err := b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestBackend_AuthedUpstream(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	conn, err := b.Dial(context.Background(), parseTarget(echoAddr))
+	conn, err := b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -238,7 +238,7 @@ func TestBackend_AuthedUpstreamWrongCreds(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	_, err = b.Dial(context.Background(), parseTarget(echoAddr))
+	_, err = b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err == nil {
 		t.Fatal("expected error for wrong credentials, got nil")
 	}
@@ -277,7 +277,7 @@ func TestBackend_UpstreamRejects(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	_, err = b.Dial(context.Background(), common.Target{Network: "tcp", Host: "example.com", Port: 443})
+	_, err = b.Dial(context.Background(), common.Target{Network: "tcp", Host: "example.com", Port: 443}, nil)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -289,16 +289,16 @@ func TestBackend_UpstreamRejects(t *testing.T) {
 func TestBackend_DialFailure(t *testing.T) {
 	b, err := NewBackend(BackendConfiguration{
 		ProxyAddress: "127.0.0.1:1", // nothing listening
-		Dial: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return nil, errors.New("unreachable")
-		},
-		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Logger:       slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	_, err = b.Dial(context.Background(), common.Target{Network: "tcp", Host: "example.com", Port: 443})
+	failingDialer := common.DialFunc(func(ctx context.Context, network, addr string) (net.Conn, error) {
+		return nil, errors.New("unreachable")
+	})
+	_, err = b.Dial(context.Background(), common.Target{Network: "tcp", Host: "example.com", Port: 443}, failingDialer)
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -396,7 +396,7 @@ func TestBackend_ChainThroughTLSProxy(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	conn, err := b.Dial(context.Background(), parseTarget(echoAddr))
+	conn, err := b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -436,7 +436,7 @@ func TestBackend_AuthedTLSUpstream(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	conn, err := b.Dial(context.Background(), parseTarget(echoAddr))
+	conn, err := b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -476,7 +476,7 @@ func TestBackend_AuthedTLSUpstreamWrongCreds(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	_, err = b.Dial(context.Background(), parseTarget(echoAddr))
+	_, err = b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err == nil {
 		t.Fatal("expected error for wrong credentials, got nil")
 	}
@@ -505,7 +505,7 @@ func TestBackend_TLSHandshakeFailure(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	_, err = b.Dial(context.Background(), parseTarget(echoAddr))
+	_, err = b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err == nil {
 		t.Fatal("expected TLS handshake error, got nil")
 	}
@@ -537,7 +537,7 @@ func TestBackend_TLSBuiltFromCAFile(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	conn, err := b.Dial(context.Background(), parseTarget(echoAddr))
+	conn, err := b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -575,7 +575,7 @@ func TestBackend_TLSCAValidationFailure(t *testing.T) {
 		t.Fatalf("NewBackend: %v", err)
 	}
 
-	_, err = b.Dial(context.Background(), parseTarget(echoAddr))
+	_, err = b.Dial(context.Background(), parseTarget(echoAddr), nil)
 	if err == nil {
 		t.Fatal("expected TLS verification error, got nil")
 	}

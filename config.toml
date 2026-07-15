@@ -105,8 +105,9 @@ type = "tun"
 # macOS 下可填 "utun5" 等指定具体 unit；Linux 下可填 "tun0" 等。
 device_name = ""
 
-# ipv4_address 是 TUN 网卡的 IPv4 地址，必须使用 CIDR 格式。必填。
-# 该地址仅作为虚拟网关，不与外部冲突即可，例如 10.0.0.1/24。
+# ipv4_address 是 TUN 网卡的 IPv4 地址，必须使用 CIDR 格式。
+# IPv4/IPv6 至少配置一个；地址会同时配置到系统接口和 gVisor netstack，
+# 因此应选择不与本地网络冲突的网段，例如 10.0.0.1/24。
 ipv4_address = "10.0.0.1/24"
 
 # ipv6_address 可选，配置 TUN 网卡的 IPv6 地址，CIDR 格式。
@@ -115,8 +116,12 @@ ipv4_address = "10.0.0.1/24"
 # mtu 是虚拟网卡的最大传输单元，省略或为 0 时使用默认值 1500。
 mtu = 1500
 
-# auto_route 为 true（默认）时，启动会接管系统默认路由指向 TUN 网卡，
-# 退出时自动还原。设为 false 则由用户自行配置路由。
+# auto_route 为 true（默认）时，启动会通过两条 /1 分流路由接管流量，
+# 同时保留原默认路由，并把 backend 及其 DNS socket 绑定到原物理出口，
+# 避免出站流量再次进入 TUN。退出时删除分流路由。
+# 如果已有 VPN/TUN 正在通过更具体的路由接管公网流量，启动会在修改系统
+# 网络前直接失败；请先关闭已有 VPN，或设为 false 后自行管理兼容路由。
+# 设为 false 时仍会配置并启用 TUN 接口，但路由和 backend 绕行由用户负责。
 auto_route = true
 
 # udp_idle_timeout 是 UDP 会话空闲超时秒数，超时后关闭该会话。

@@ -2,12 +2,32 @@ package direct
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"testing"
 
 	"github.com/puppy/pkg/common"
 )
+
+func TestDirectDial_UsesProvidedDialer(t *testing.T) {
+	wantErr := errors.New("dial stopped")
+	var gotNetwork, gotAddress string
+	dialer := common.DialFunc(func(ctx context.Context, network, address string) (net.Conn, error) {
+		gotNetwork, gotAddress = network, address
+		return nil, wantErr
+	})
+
+	_, err := NewBackend().Dial(context.Background(), common.Target{
+		Network: "udp", Host: "192.0.2.1", Port: 53,
+	}, dialer)
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want %v", err, wantErr)
+	}
+	if gotNetwork != "udp" || gotAddress != "192.0.2.1:53" {
+		t.Fatalf("dial = (%q, %q), want (udp, 192.0.2.1:53)", gotNetwork, gotAddress)
+	}
+}
 
 // echoServer starts a local TCP listener that mirrors bytes back to the writer.
 func echoServer(t *testing.T) string {
@@ -41,7 +61,7 @@ func TestDirectDial_TCP(t *testing.T) {
 	}
 
 	b := NewBackend()
-	conn, err := b.Dial(context.Background(), common.Target{Network: "tcp", Host: host, Port: port})
+	conn, err := b.Dial(context.Background(), common.Target{Network: "tcp", Host: host, Port: port}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -70,7 +90,7 @@ func TestDirectDial_NetworkDefaultsTCP(t *testing.T) {
 
 	b := NewBackend()
 	// Network intentionally left empty; Net() should default to "tcp".
-	conn, err := b.Dial(context.Background(), common.Target{Host: host, Port: port})
+	conn, err := b.Dial(context.Background(), common.Target{Host: host, Port: port}, nil)
 	if err != nil {
 		t.Fatalf("Dial with empty network: %v", err)
 	}

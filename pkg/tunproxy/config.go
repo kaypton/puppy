@@ -24,15 +24,15 @@ type Configuration struct {
 	// one ("utun" on macOS, "tunN" on Linux). On macOS use "utunN" to request
 	// unit N; on Linux any kernel-accepted name is honored.
 	DeviceName string `toml:"device_name"`
-	// IPv4Address is the TUN interface address in CIDR form, e.g. "10.0.0.1/24".
-	// Required.
+	// IPv4Address is the TUN interface address in CIDR form, e.g.
+	// "10.0.0.1/24". At least one of IPv4Address and IPv6Address is required.
 	IPv4Address string `toml:"ipv4_address"`
 	// IPv6Address optionally configures an IPv6 interface address in CIDR form.
 	IPv6Address string `toml:"ipv6_address"`
 	// MTU is the device maximum transmission unit. Zero defaults to 1500.
 	MTU int `toml:"mtu"`
-	// AutoRoute, when true (default), installs a default route through the TUN
-	// device on startup and restores the previous default route on shutdown.
+	// AutoRoute, when true (default), installs split-default routes through the
+	// TUN device while retaining the original default route for backend egress.
 	AutoRoute *bool `toml:"auto_route"`
 	// UDPIdleTimeout closes idle UDP sessions after this duration. Zero or
 	// negative uses the 30s default.
@@ -45,18 +45,8 @@ type Configuration struct {
 
 // Validate checks the TUN proxy frontend's own configuration fields.
 func (c Configuration) Validate() error {
-	if c.IPv4Address == "" && c.IPv6Address == "" {
-		return errors.New("ipv4_address or ipv6_address is required")
-	}
-	if c.IPv4Address != "" {
-		if _, _, err := net.ParseCIDR(c.IPv4Address); err != nil {
-			return fmt.Errorf("ipv4_address must be in CIDR form: %w", err)
-		}
-	}
-	if c.IPv6Address != "" {
-		if _, _, err := net.ParseCIDR(c.IPv6Address); err != nil {
-			return fmt.Errorf("ipv6_address must be in CIDR form: %w", err)
-		}
+	if err := validateAddresses(c.IPv4Address, c.IPv6Address); err != nil {
+		return err
 	}
 	if c.MTU < 0 {
 		return errors.New("mtu must not be negative")
@@ -66,6 +56,31 @@ func (c Configuration) Validate() error {
 	}
 	if c.Shim == "" {
 		return errors.New("shim reference is required")
+	}
+	return nil
+}
+
+func validateAddresses(ipv4Address, ipv6Address string) error {
+	if ipv4Address == "" && ipv6Address == "" {
+		return errors.New("ipv4_address or ipv6_address is required")
+	}
+	if ipv4Address != "" {
+		ip, _, err := net.ParseCIDR(ipv4Address)
+		if err != nil {
+			return fmt.Errorf("ipv4_address must be in CIDR form: %w", err)
+		}
+		if ip.To4() == nil {
+			return errors.New("ipv4_address must contain an IPv4 address")
+		}
+	}
+	if ipv6Address != "" {
+		ip, _, err := net.ParseCIDR(ipv6Address)
+		if err != nil {
+			return fmt.Errorf("ipv6_address must be in CIDR form: %w", err)
+		}
+		if ip.To4() != nil {
+			return errors.New("ipv6_address must contain an IPv6 address")
+		}
 	}
 	return nil
 }

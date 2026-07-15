@@ -48,8 +48,6 @@ type BackendConfiguration struct {
 	// the upstream proxy. When nil and TLS is true, a *tls.Config is built
 	// from the fields above. Mainly intended for test injection.
 	TLSConfig *tls.Config
-	// Dial reaches the upstream proxy. When nil, a net.Dialer is used.
-	Dial func(ctx context.Context, network, addr string) (net.Conn, error)
 	// Logger receives structured log events. When nil, slog.Default() is used.
 	Logger *slog.Logger
 }
@@ -58,7 +56,6 @@ type BackendConfiguration struct {
 type Backend struct {
 	config    BackendConfiguration
 	logger    *slog.Logger
-	dial      func(ctx context.Context, network, addr string) (net.Conn, error)
 	tlsConfig *tls.Config
 }
 
@@ -78,13 +75,6 @@ func NewBackend(config BackendConfiguration) (*Backend, error) {
 	if config.TLSInsecureSkipVerify && config.TLSCAFile != "" {
 		return nil, errors.New("httpproxy: tls_insecure_skip_verify and tls_ca_file are mutually exclusive")
 	}
-	dial := config.Dial
-	if dial == nil {
-		var d net.Dialer
-		dial = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return d.DialContext(ctx, network, addr)
-		}
-	}
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -97,7 +87,7 @@ func NewBackend(config BackendConfiguration) (*Backend, error) {
 		}
 		tlsConfig = built
 	}
-	return &Backend{config: config, logger: logger, dial: dial, tlsConfig: tlsConfig}, nil
+	return &Backend{config: config, logger: logger, tlsConfig: tlsConfig}, nil
 }
 
 // buildClientTLSConfig constructs a *tls.Config for the upstream proxy
@@ -135,8 +125,11 @@ func buildClientTLSConfig(proxyAddress, serverName, caFile string, insecure bool
 
 // Dial connects to the upstream proxy, issues a CONNECT to target, and returns
 // the tunneled connection.
-func (b *Backend) Dial(ctx context.Context, target common.Target) (io.ReadWriteCloser, error) {
-	conn, err := b.dial(ctx, "tcp", b.config.ProxyAddress)
+func (b *Backend) Dial(ctx context.Context, target common.Target, dialer common.Dialer) (io.ReadWriteCloser, error) {
+	if dialer == nil {
+		dialer = common.SystemDialer()
+	}
+	conn, err := dialer.DialContext(ctx, "tcp", b.config.ProxyAddress)
 	if err != nil {
 		return nil, fmt.Errorf("httpproxy: dial upstream proxy: %w", err)
 	}

@@ -2,8 +2,12 @@ package tunproxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
@@ -113,7 +117,8 @@ func newNetworkStack(device Device, mtu uint32) (*networkStack, error) {
 // startPumps launches the inbound (device -> netstack) and outbound
 // (netstack -> device) goroutines. It must be called once after
 // newNetworkStack.
-func (ns *networkStack) startPumps() {
+func (ns *networkStack) startPumps() <-chan error {
+	errs := make(chan error, 2)
 	// Inbound: read raw IP packets from the TUN device and inject them into
 	// the netstack via the channel endpoint.
 	ns.inboundWG.Add(1)
@@ -126,6 +131,15 @@ func (ns *networkStack) startPumps() {
 				if ctxErr := ns.inboundCtx.Err(); ctxErr != nil {
 					return
 				}
+				if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+					select {
+					case <-ns.inboundCtx.Done():
+						return
+					case <-time.After(time.Millisecond):
+						continue
+					}
+				}
+				errs <- fmt.Errorf("tunproxy: read TUN device: %w", err)
 				return
 			}
 			if n == 0 {
@@ -163,17 +177,24 @@ func (ns *networkStack) startPumps() {
 				return
 			}
 			pktBuf := pkt.ToBuffer()
-			_, err := ns.device.Write(pktBuf.Flatten())
+			data := pktBuf.Flatten()
+			n, err := ns.device.Write(data)
 			pktBuf.Release()
 			pkt.DecRef()
 			if err != nil {
 				if ctxErr := ns.inboundCtx.Err(); ctxErr != nil {
 					return
 				}
+				errs <- fmt.Errorf("tunproxy: write TUN device: %w", err)
+				return
+			}
+			if n != len(data) {
+				errs <- fmt.Errorf("tunproxy: write TUN device: %w", io.ErrShortWrite)
 				return
 			}
 		}
 	}()
+	return errs
 }
 
 // stop halts the pumps and releases the netstack resources. It is safe to

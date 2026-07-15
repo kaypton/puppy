@@ -18,6 +18,7 @@ import (
 type dispatcher struct {
 	ns      *networkStack
 	backend common.Backend
+	dialer  common.Dialer
 	shimBuf int
 	udpIdle time.Duration
 	logger  *slog.Logger
@@ -27,10 +28,11 @@ type dispatcher struct {
 
 // newDispatcher creates a dispatcher bound to the given context. Run must be
 // cancelled to release in-flight sessions.
-func newDispatcher(ctx context.Context, ns *networkStack, backend common.Backend, shimBuf int, udpIdle time.Duration, logger *slog.Logger) *dispatcher {
+func newDispatcher(ctx context.Context, ns *networkStack, backend common.Backend, dialer common.Dialer, shimBuf int, udpIdle time.Duration, logger *slog.Logger) *dispatcher {
 	return &dispatcher{
 		ns:      ns,
 		backend: backend,
+		dialer:  dialer,
 		shimBuf: shimBuf,
 		udpIdle: udpIdle,
 		logger:  logger,
@@ -53,7 +55,7 @@ func (d *dispatcher) HandleTCP(req *tcp.ForwarderRequest) {
 }
 
 func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
-	upstream, err := d.backend.Dial(d.ctx, target)
+	upstream, err := d.backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
 		d.logger.Info("tunproxy: tcp backend dial failed", "target", target.Address(), "err", err)
 		req.Complete(true) // send RST
@@ -100,7 +102,7 @@ func (d *dispatcher) HandleUDP(req *udp.ForwarderRequest) {
 }
 
 func (d *dispatcher) serveUDP(req *udp.ForwarderRequest, target common.Target) {
-	upstream, err := d.backend.Dial(d.ctx, target)
+	upstream, err := d.backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
 		d.logger.Info("tunproxy: udp backend dial failed", "target", target.Address(), "err", err)
 		return
@@ -125,6 +127,10 @@ func (d *dispatcher) serveUDP(req *udp.ForwarderRequest, target common.Target) {
 		timer := time.NewTimer(d.udpIdle)
 		for {
 			select {
+			case <-d.ctx.Done():
+				_ = frontend.Close()
+				_ = upstream.Close()
+				return
 			case <-stop:
 				timer.Stop()
 				return

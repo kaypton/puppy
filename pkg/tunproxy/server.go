@@ -34,8 +34,8 @@ type Server struct {
 
 // NewServer validates the configuration and returns a ready-to-run server.
 func NewServer(config ServerConfiguration) (*Server, error) {
-	if config.IPv4Address == "" && config.IPv6Address == "" {
-		return nil, errors.New("tunproxy: ipv4_address or ipv6_address is required")
+	if err := validateAddresses(config.IPv4Address, config.IPv6Address); err != nil {
+		return nil, fmt.Errorf("tunproxy: %w", err)
 	}
 	if config.Backend == nil {
 		return nil, errors.New("tunproxy: backend is required")
@@ -52,7 +52,7 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 
 // Run opens the TUN device, configures routing, and serves until ctx is
 // cancelled. It always restores routing state before returning.
-func (s *Server) Run(ctx context.Context) error {
+func (s *Server) Run(ctx context.Context) (runErr error) {
 	if os.Geteuid() != 0 {
 		return errors.New("tunproxy: TUN mode requires root privileges")
 	}
@@ -68,6 +68,12 @@ func (s *Server) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	stackStopped := false
+	defer func() {
+		if !stackStopped {
+			ns.stop()
+		}
+	}()
 	if s.config.IPv4Address != "" {
 		if err := ns.addAddress(s.config.IPv4Address); err != nil {
 			return err
@@ -79,36 +85,46 @@ func (s *Server) Run(ctx context.Context) error {
 		}
 	}
 
-	dispatcher := newDispatcher(ctx, ns, s.config.Backend, s.config.ShimBufferSize, s.config.UDPIdleTimeout, s.logger)
+	networkMgr := newHostNetworkManager(
+		device.Name(), s.config.IPv4Address, s.config.IPv6Address, s.config.AutoRoute,
+	)
+	dialer, err := networkMgr.Apply()
+	if err != nil {
+		return fmt.Errorf("tunproxy: configure host network: %w", err)
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	dispatcher := newDispatcher(runCtx, ns, s.config.Backend, dialer, s.config.ShimBufferSize, s.config.UDPIdleTimeout, s.logger)
 	ns.handler = dispatcher
-	ns.startPumps()
 	defer func() {
+		// Restore host routing before waiting for sessions. In particular, UDP
+		// relays may otherwise keep dispatcher.wait blocked while the split
+		// routes continue to black-hole all host traffic.
+		cancel()
+		if err := networkMgr.Restore(); err != nil {
+			s.logger.Error("tunproxy: restore host network failed", "err", err)
+			runErr = errors.Join(runErr, fmt.Errorf("tunproxy: restore host network: %w", err))
+		}
 		ns.stop()
+		stackStopped = true
 		dispatcher.wait()
 	}()
-
-	var routeMgr routeManager
-	if s.config.AutoRoute {
-		routeMgr = newRouteManager(device.Name(), s.config.IPv4Address)
-	} else {
-		routeMgr = noOpRouteManager{}
-	}
-	if err := routeMgr.Apply(); err != nil {
-		return fmt.Errorf("tunproxy: apply routes: %w", err)
-	}
-	defer func() {
-		if err := routeMgr.Restore(); err != nil {
-			s.logger.Error("tunproxy: restore routes failed", "err", err)
-		}
-	}()
+	pumpErr := ns.startPumps()
+	egress4, egress6 := networkMgr.EgressInterfaces()
 
 	s.logger.Info("tunproxy: serving",
 		"device", device.Name(),
 		"ipv4", s.config.IPv4Address,
 		"ipv6", s.config.IPv6Address,
+		"egress_ipv4_interface", egress4,
+		"egress_ipv6_interface", egress6,
 		"auto_route", s.config.AutoRoute)
 
-	<-ctx.Done()
-	s.logger.Info("tunproxy: shutting down")
-	return nil
+	select {
+	case <-ctx.Done():
+		s.logger.Info("tunproxy: shutting down")
+		return nil
+	case err := <-pumpErr:
+		cancel()
+		return err
+	}
 }

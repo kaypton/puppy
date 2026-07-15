@@ -3,71 +3,204 @@
 package tunproxy
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"os/exec"
+	"strconv"
 	"strings"
+
+	"github.com/puppy/pkg/common"
 )
 
-// darwinRouteManager installs the TUN device as the default route on macOS and
-// restores the original default gateway on cleanup.
-type darwinRouteManager struct {
-	device   string
-	gateway  string
-	oldIface string
-	applied  bool
+type darwinHostNetworkManager struct {
+	device    string
+	ipv4Addr  string
+	ipv6Addr  string
+	autoRoute bool
+	egress4   string
+	egress6   string
+
+	configured4  bool
+	configured6  bool
+	routes       []darwinRoute
+	applied      bool
+	run          func(string, ...string) error
+	defaultRoute func(string) (string, string, error)
+	routeIface   func(string, string) (string, error)
 }
 
-func newRouteManager(device, ipv4Addr string) routeManager {
-	return &darwinRouteManager{device: device}
+type darwinRoute struct {
+	family string
+	prefix string
 }
 
-// Apply captures the current default route, then points the default route at
-// the TUN device.
-func (r *darwinRouteManager) Apply() error {
-	gw, iface, err := r.currentDefault()
-	if err != nil {
-		// No existing default route; nothing to restore but we can still add.
-		r.gateway = ""
-		r.oldIface = ""
-	} else {
-		r.gateway = gw
-		r.oldIface = iface
+func newHostNetworkManager(device, ipv4Addr, ipv6Addr string, autoRoute bool) hostNetworkManager {
+	return &darwinHostNetworkManager{
+		device: device, ipv4Addr: ipv4Addr, ipv6Addr: ipv6Addr, autoRoute: autoRoute,
+		run: runDarwin, defaultRoute: darwinDefaultRoute, routeIface: darwinRouteInterface,
+	}
+}
+
+func (m *darwinHostNetworkManager) Apply() (dialer common.Dialer, err error) {
+	if m.applied {
+		return nil, errors.New("tunproxy: host network already configured")
+	}
+	m.applied = true
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, m.Restore())
+		}
+	}()
+
+	var iface4, iface6 string
+	if m.autoRoute {
+		if m.ipv4Addr != "" {
+			_, iface4, err = m.defaultRoute("-inet")
+			if err != nil {
+				return nil, fmt.Errorf("tunproxy: discover IPv4 default route: %w", err)
+			}
+			if err = m.validateEgress("-inet", iface4, []string{"1.1.1.1", "8.8.8.8"}); err != nil {
+				return nil, err
+			}
+		}
+		if m.ipv6Addr != "" {
+			_, iface6, err = m.defaultRoute("-inet6")
+			if err != nil {
+				return nil, fmt.Errorf("tunproxy: discover IPv6 default route: %w", err)
+			}
+			if err = m.validateEgress("-inet6", iface6, []string{"2606:4700:4700::1111", "2001:4860:4860::8888"}); err != nil {
+				return nil, err
+			}
+		}
+		m.egress4, m.egress6 = iface4, iface6
 	}
 
-	// Add a default route through the TUN interface. Using a high-priority
-	// (low metric) entry so it wins over the previous default.
-	if out, err := exec.Command("route", "-n", "add", "-net", "default", "-interface", r.device).CombinedOutput(); err != nil {
-		return fmt.Errorf("tunproxy: route add default -interface %s: %w: %s", r.device, err, strings.TrimSpace(string(out)))
+	if m.ipv4Addr != "" {
+		ip, mask, parseErr := darwinIPv4Parts(m.ipv4Addr)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if err = m.run("ifconfig", m.device, "inet", ip, ip, "netmask", mask, "up"); err != nil {
+			return nil, fmt.Errorf("tunproxy: add IPv4 address %s: %w", m.ipv4Addr, err)
+		}
+		m.configured4 = true
 	}
-	r.applied = true
+	if m.ipv6Addr != "" {
+		ip, network, parseErr := net.ParseCIDR(m.ipv6Addr)
+		if parseErr != nil {
+			return nil, fmt.Errorf("tunproxy: parse IPv6 address %s: %w", m.ipv6Addr, parseErr)
+		}
+		prefix, _ := network.Mask.Size()
+		if err = m.run("ifconfig", m.device, "inet6", ip.String(), "prefixlen", strconv.Itoa(prefix), "alias"); err != nil {
+			return nil, fmt.Errorf("tunproxy: add IPv6 address %s: %w", m.ipv6Addr, err)
+		}
+		m.configured6 = true
+	}
+	if !m.autoRoute {
+		return common.SystemDialer(), nil
+	}
+
+	for _, route := range splitRoutes(m.ipv4Addr != "", m.ipv6Addr != "") {
+		family := "-inet"
+		if route.family == "-6" {
+			family = "-inet6"
+		}
+		if err = m.run("route", "-n", "add", family, "-net", route.prefix, "-interface", m.device); err != nil {
+			return nil, fmt.Errorf("tunproxy: add route %s: %w", route.prefix, err)
+		}
+		m.routes = append(m.routes, darwinRoute{family: family, prefix: route.prefix})
+	}
+	return newBoundDialer(iface4, iface6)
+}
+
+func (m *darwinHostNetworkManager) validateEgress(family, defaultIface string, probes []string) error {
+	if isTunnelInterface(defaultIface) {
+		return fmt.Errorf("tunproxy: default egress interface %s is already a tunnel; disable the existing VPN or set auto_route = false", defaultIface)
+	}
+	for _, destination := range probes {
+		iface, err := m.routeIface(family, destination)
+		if err != nil {
+			return fmt.Errorf("tunproxy: inspect route to %s: %w", destination, err)
+		}
+		if iface != defaultIface {
+			return fmt.Errorf("tunproxy: route to %s uses %s instead of default egress %s; disable the existing VPN or set auto_route = false", destination, iface, defaultIface)
+		}
+	}
 	return nil
 }
 
-// Restore removes the TUN default route and reinstates the original gateway if
-// one was captured.
-func (r *darwinRouteManager) Restore() error {
-	if !r.applied {
+func (m *darwinHostNetworkManager) EgressInterfaces() (string, string) {
+	return m.egress4, m.egress6
+}
+
+func (m *darwinHostNetworkManager) Restore() error {
+	if !m.applied {
 		return nil
 	}
-	r.applied = false
-	_, _ = exec.Command("route", "-n", "delete", "-net", "default", "-interface", r.device).CombinedOutput()
-	if r.gateway != "" {
-		args := []string{"-n", "add", "-net", "default", r.gateway}
-		if r.oldIface != "" {
-			args = append(args, "-interface", r.oldIface)
+	m.applied = false
+	m.egress4, m.egress6 = "", ""
+	var errs []error
+	for i := len(m.routes) - 1; i >= 0; i-- {
+		route := m.routes[i]
+		if err := m.run("route", "-n", "delete", route.family, "-net", route.prefix, "-interface", m.device); err != nil {
+			errs = append(errs, fmt.Errorf("delete route %s: %w", route.prefix, err))
 		}
-		_, _ = exec.Command("route", args...).CombinedOutput()
+	}
+	m.routes = nil
+	if m.configured6 {
+		ip, _, _ := net.ParseCIDR(m.ipv6Addr)
+		if err := m.run("ifconfig", m.device, "inet6", ip.String(), "-alias"); err != nil {
+			errs = append(errs, fmt.Errorf("delete IPv6 address %s: %w", m.ipv6Addr, err))
+		}
+		m.configured6 = false
+	}
+	if m.configured4 {
+		ip, _, _ := net.ParseCIDR(m.ipv4Addr)
+		if err := m.run("ifconfig", m.device, "inet", ip.String(), "-alias"); err != nil {
+			errs = append(errs, fmt.Errorf("delete IPv4 address %s: %w", m.ipv4Addr, err))
+		}
+		m.configured4 = false
+	}
+	return errors.Join(errs...)
+}
+
+func darwinIPv4Parts(cidr string) (string, string, error) {
+	ip, network, err := net.ParseCIDR(cidr)
+	if err != nil || ip.To4() == nil {
+		return "", "", fmt.Errorf("tunproxy: parse IPv4 address %s", cidr)
+	}
+	mask := net.IP(network.Mask).String()
+	return ip.String(), mask, nil
+}
+
+func runDarwin(name string, args ...string) error {
+	out, err := exec.Command(name, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
 
-// currentDefault parses `route -n get default` for the gateway and interface.
-func (r *darwinRouteManager) currentDefault() (gateway, iface string, err error) {
-	out, err := exec.Command("route", "-n", "get", "default").CombinedOutput()
+func darwinDefaultRoute(family string) (gateway, iface string, err error) {
+	out, err := exec.Command("route", "-n", "get", family, "default").CombinedOutput()
 	if err != nil {
-		return "", "", err
+		return "", "", fmt.Errorf("route get %s default: %w: %s", family, err, strings.TrimSpace(string(out)))
 	}
-	for _, line := range strings.Split(string(out), "\n") {
+	return parseDarwinDefaultRoute(string(out))
+}
+
+func darwinRouteInterface(family, destination string) (string, error) {
+	out, err := exec.Command("route", "-n", "get", family, destination).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("route get %s %s: %w: %s", family, destination, err, strings.TrimSpace(string(out)))
+	}
+	_, iface, err := parseDarwinDefaultRoute(string(out))
+	return iface, err
+}
+
+func parseDarwinDefaultRoute(output string) (gateway, iface string, err error) {
+	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "gateway:") {
 			gateway = strings.TrimSpace(strings.TrimPrefix(line, "gateway:"))
@@ -76,8 +209,8 @@ func (r *darwinRouteManager) currentDefault() (gateway, iface string, err error)
 			iface = strings.TrimSpace(strings.TrimPrefix(line, "interface:"))
 		}
 	}
-	if gateway == "" {
-		return "", "", fmt.Errorf("no default gateway")
+	if iface == "" {
+		return "", "", errors.New("no default route interface")
 	}
 	return gateway, iface, nil
 }

@@ -37,6 +37,24 @@ func TestConfiguration_Validate(t *testing.T) {
 			wantErr: "ipv6_address must be in CIDR form",
 		},
 		{
+			name: "ipv4 field contains ipv6",
+			cfg: Configuration{
+				IPv4Address: "fd00::1/64",
+				Backend:     "b",
+				Shim:        "s",
+			},
+			wantErr: "ipv4_address must contain an IPv4 address",
+		},
+		{
+			name: "ipv6 field contains ipv4",
+			cfg: Configuration{
+				IPv6Address: "10.0.0.1/24",
+				Backend:     "b",
+				Shim:        "s",
+			},
+			wantErr: "ipv6_address must contain an IPv6 address",
+		},
+		{
 			name: "negative mtu",
 			cfg: Configuration{
 				IPv4Address: "10.0.0.1/24",

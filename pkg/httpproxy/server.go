@@ -39,6 +39,9 @@ type ServerConfiguration struct {
 	// Backend dials the upstream connection for each CONNECT target. Required.
 	// Implementations live in pkg/adapter/* (direct, httpproxy, ...).
 	Backend common.Backend
+	// EgressDialer establishes backend transport connections. When nil, the
+	// host's normal network path is used.
+	EgressDialer common.Dialer
 	// ShimBufferSize controls the per-direction copy buffer used by each
 	// tunnel. When non-positive, the shim package default is used.
 	ShimBufferSize int
@@ -55,6 +58,7 @@ type Server struct {
 	config    ServerConfiguration
 	logger    *slog.Logger
 	backend   common.Backend
+	dialer    common.Dialer
 	tlsConfig *tls.Config
 }
 
@@ -71,6 +75,9 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	}
 	if config.Backend == nil {
 		return nil, errors.New("httpproxy: backend is required")
+	}
+	if config.EgressDialer == nil {
+		config.EgressDialer = common.SystemDialer()
 	}
 	if (config.Username == "") != (config.Password == "") {
 		return nil, errors.New("httpproxy: username and password must both be set or both be empty")
@@ -96,7 +103,7 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 			NextProtos:   []string{"http/1.1"},
 		}
 	}
-	return &Server{config: config, logger: logger, backend: config.Backend, tlsConfig: tlsConfig}, nil
+	return &Server{config: config, logger: logger, backend: config.Backend, dialer: config.EgressDialer, tlsConfig: tlsConfig}, nil
 }
 
 func normalizeCamouflageMethod(method CamouflageMethod) CamouflageMethod {
@@ -171,7 +178,7 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// Handshake done; clear the deadline for the tunneled phase.
 	_ = conn.SetDeadline(time.Time{})
 
-	upstream, err := s.backend.Dial(ctx, target)
+	upstream, err := s.backend.Dial(ctx, target, s.dialer)
 	if err != nil {
 		s.writeError(conn, httpStatusBadGateway, nil)
 		s.logger.Info("backend dial failed", "target", target.Address(), "err", err)

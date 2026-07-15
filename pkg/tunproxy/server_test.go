@@ -24,6 +24,7 @@ func TestNewServer_Validation(t *testing.T) {
 		wantErr string
 	}{
 		{"missing addresses", ServerConfiguration{Backend: backend, Logger: logger}, "ipv4_address or ipv6_address is required"},
+		{"IPv4 field contains IPv6", ServerConfiguration{IPv4Address: "fd00::1/64", Backend: backend, Logger: logger}, "ipv4_address must contain an IPv4 address"},
 		{"missing backend", ServerConfiguration{IPv4Address: "10.0.0.1/24", Logger: logger}, "backend is required"},
 		{"valid", ServerConfiguration{IPv4Address: "10.0.0.1/24", Backend: backend, Logger: logger}, ""},
 	}
@@ -160,9 +161,6 @@ func TestServer_RunContextCancelWithoutRoot(t *testing.T) {
 	}
 }
 
-// Compile-time assertion that the noOpRouteManager satisfies the interface.
-var _ routeManager = noOpRouteManager{}
-
 // Compile-time assertion that the dispatcher satisfies sessionHandler.
 var _ sessionHandler = (*dispatcher)(nil)
 
@@ -170,7 +168,7 @@ var _ sessionHandler = (*dispatcher)(nil)
 // dispatcher behavior without a real upstream.
 type errorBackend struct{}
 
-func (errorBackend) Dial(context.Context, common.Target) (io.ReadWriteCloser, error) {
+func (errorBackend) Dial(context.Context, common.Target, common.Dialer) (io.ReadWriteCloser, error) {
 	return nil, errors.New("unreachable")
 }
 

@@ -30,7 +30,7 @@ import (
 // errorBackend is a common.Backend whose Dial always returns err.
 type errorBackend struct{ err error }
 
-func (b *errorBackend) Dial(ctx context.Context, target common.Target) (io.ReadWriteCloser, error) {
+func (b *errorBackend) Dial(ctx context.Context, target common.Target, dialer common.Dialer) (io.ReadWriteCloser, error) {
 	return nil, b.err
 }
 

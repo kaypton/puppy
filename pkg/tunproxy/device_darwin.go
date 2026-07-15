@@ -62,7 +62,7 @@ type rawSockaddrCtl struct {
 
 // darwinDevice wraps an open utun control socket.
 type darwinDevice struct {
-	fd   int
+	fd   *os.File
 	name string
 	mtu  uint32
 }
@@ -121,7 +121,11 @@ func openDevice(name string, mtu uint32) (Device, error) {
 		return nil, fmt.Errorf("tunproxy: set nonblock: %w", err)
 	}
 
-	return &darwinDevice{fd: fd, name: assigned, mtu: mtu}, nil
+	return &darwinDevice{
+		fd:   os.NewFile(uintptr(fd), "/dev/"+assigned),
+		name: assigned,
+		mtu:  mtu,
+	}, nil
 }
 
 func (d *darwinDevice) Name() string { return d.name }
@@ -132,9 +136,9 @@ func (d *darwinDevice) Read(p []byte) (int, error) {
 	if len(p) < 4 {
 		return 0, fmt.Errorf("tunproxy: read buffer too small")
 	}
-	n, err := syscall.Read(d.fd, p)
+	n, err := d.fd.Read(p)
 	if err != nil {
-		if errors.Is(err, os.ErrClosed) || err == syscall.EBADF {
+		if errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) {
 			return 0, ErrDeviceClosed
 		}
 		return 0, err
@@ -163,9 +167,9 @@ func (d *darwinDevice) Write(p []byte) (int, error) {
 	w := make([]byte, 0, 4+len(p))
 	w = append(w, hdr[:]...)
 	w = append(w, p...)
-	_, err := syscall.Write(d.fd, w)
+	_, err := d.fd.Write(w)
 	if err != nil {
-		if errors.Is(err, os.ErrClosed) || err == syscall.EBADF {
+		if errors.Is(err, os.ErrClosed) || errors.Is(err, syscall.EBADF) {
 			return 0, ErrDeviceClosed
 		}
 		return 0, err
@@ -173,7 +177,7 @@ func (d *darwinDevice) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-func (d *darwinDevice) Close() error { return syscall.Close(d.fd) }
+func (d *darwinDevice) Close() error { return d.fd.Close() }
 
 // utunName retrieves the interface name assigned by the kernel via getsockopt.
 func utunName(fd int) (string, error) {
