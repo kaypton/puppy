@@ -14,5 +14,4 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
 	golang.org/x/time v0.15.0 // indirect
-	gvisor.dev/gvisor v0.0.0-20260714071330-9cb44186726e // indirect
 )
