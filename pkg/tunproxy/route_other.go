@@ -10,13 +10,19 @@ import (
 
 type unsupportedHostNetworkManager struct{}
 
-func newHostNetworkManager(device, ipv4Addr, ipv6Addr string, autoRoute bool) hostNetworkManager {
+func newHostNetworkManager(device, ipv4Addr, ipv6Addr string, autoRoute, interceptSystemdResolved bool) hostNetworkManager {
 	return unsupportedHostNetworkManager{}
+}
+
+func systemdResolvedInterceptionEnabled(autoRoute, dnsConfigured, ipv4Configured bool) bool {
+	return false
 }
 
 func (unsupportedHostNetworkManager) Apply() (common.Dialer, error) {
 	return nil, fmt.Errorf("tunproxy: host network configuration not supported on this platform")
 }
+
+func (unsupportedHostNetworkManager) EnableDNSInterception(dnsInterceptHandler) error { return nil }
 
 func (unsupportedHostNetworkManager) Restore() error { return nil }
 

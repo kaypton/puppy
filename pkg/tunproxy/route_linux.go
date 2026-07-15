@@ -5,6 +5,7 @@ package tunproxy
 import (
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os/exec"
 	"strings"
 
@@ -12,18 +13,24 @@ import (
 )
 
 type linuxHostNetworkManager struct {
-	device    string
-	ipv4Addr  string
-	ipv6Addr  string
-	autoRoute bool
-	egress4   string
-	egress6   string
+	device                   string
+	ipv4Addr                 string
+	ipv6Addr                 string
+	autoRoute                bool
+	interceptSystemdResolved bool
+	egress4                  string
+	egress6                  string
 
 	configured4  bool
 	configured6  bool
 	routes       []linuxRoute
+	nftTable     string
+	nftApplied   bool
+	dnsProxy     *linuxDNSProxy
 	applied      bool
 	run          func(...string) error
+	checkNFT     func(string) error
+	runNFT       func(string) error
 	defaultRoute func(string) (string, string, error)
 	routeIface   func(string, string) (string, error)
 }
@@ -33,11 +40,18 @@ type linuxRoute struct {
 	prefix string
 }
 
-func newHostNetworkManager(device, ipv4Addr, ipv6Addr string, autoRoute bool) hostNetworkManager {
+func newHostNetworkManager(device, ipv4Addr, ipv6Addr string, autoRoute, interceptSystemdResolved bool) hostNetworkManager {
 	return &linuxHostNetworkManager{
 		device: device, ipv4Addr: ipv4Addr, ipv6Addr: ipv6Addr, autoRoute: autoRoute,
-		run: runLinuxIP, defaultRoute: linuxDefaultRoute, routeIface: linuxRouteInterface,
+		interceptSystemdResolved: interceptSystemdResolved,
+		nftTable:                 linuxNFTTableName(device),
+		run:                      runLinuxIP, checkNFT: checkLinuxNFT, runNFT: runLinuxNFT,
+		defaultRoute: linuxDefaultRoute, routeIface: linuxRouteInterface,
 	}
+}
+
+func systemdResolvedInterceptionEnabled(autoRoute, dnsConfigured, ipv4Configured bool) bool {
+	return autoRoute && dnsConfigured && ipv4Configured
 }
 
 func (m *linuxHostNetworkManager) Apply() (dialer common.Dialer, err error) {
@@ -50,6 +64,11 @@ func (m *linuxHostNetworkManager) Apply() (dialer common.Dialer, err error) {
 			err = errors.Join(err, m.Restore())
 		}
 	}()
+	if m.autoRoute && m.interceptSystemdResolved {
+		if err = m.checkNFT(m.nftApplyScript(1, 1)); err != nil {
+			return nil, fmt.Errorf("tunproxy: validate nft DNS interception table %s (ensure nft is installed and remove any stale Puppy table): %w", m.nftTable, err)
+		}
+	}
 
 	var iface4, iface6 string
 	if m.autoRoute {
@@ -102,6 +121,38 @@ func (m *linuxHostNetworkManager) Apply() (dialer common.Dialer, err error) {
 	return newBoundDialer(iface4, iface6)
 }
 
+func (m *linuxHostNetworkManager) EnableDNSInterception(handler dnsInterceptHandler) error {
+	if !m.autoRoute || !m.interceptSystemdResolved {
+		return nil
+	}
+	if !m.applied {
+		return errors.New("host network must be configured before DNS interception")
+	}
+	if handler == nil {
+		return errors.New("DNS interception handler is required")
+	}
+	if m.dnsProxy != nil || m.nftApplied {
+		return errors.New("DNS interception is already enabled")
+	}
+	proxy, err := newLinuxDNSProxy(handler)
+	if err != nil {
+		return err
+	}
+	script := m.nftApplyScript(proxy.udpPort(), proxy.tcpPort())
+	if err := m.checkNFT(script); err != nil {
+		_ = proxy.Close()
+		return fmt.Errorf("validate nft DNS interception: %w", err)
+	}
+	if err := m.runNFT(script); err != nil {
+		_ = proxy.Close()
+		return fmt.Errorf("install nft DNS interception: %w", err)
+	}
+	m.nftApplied = true
+	m.dnsProxy = proxy
+	proxy.Start()
+	return nil
+}
+
 func (m *linuxHostNetworkManager) validateEgress(family, defaultIface string, probes []string) error {
 	if isTunnelInterface(defaultIface) {
 		return fmt.Errorf("tunproxy: default egress interface %s is already a tunnel; disable the existing VPN or set auto_route = false", defaultIface)
@@ -129,6 +180,19 @@ func (m *linuxHostNetworkManager) Restore() error {
 	m.applied = false
 	m.egress4, m.egress6 = "", ""
 	var errs []error
+	if m.nftApplied {
+		if err := m.runNFT(fmt.Sprintf("delete table ip %s\n", m.nftTable)); err != nil {
+			errs = append(errs, fmt.Errorf("delete nft DNS interception table %s: %w", m.nftTable, err))
+		} else {
+			m.nftApplied = false
+		}
+	}
+	if m.dnsProxy != nil {
+		if err := m.dnsProxy.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close systemd-resolved DNS interceptor: %w", err))
+		}
+		m.dnsProxy = nil
+	}
 	for i := len(m.routes) - 1; i >= 0; i-- {
 		route := m.routes[i]
 		if err := m.run(route.family, "route", "del", route.prefix, "dev", m.device); err != nil {
@@ -149,6 +213,43 @@ func (m *linuxHostNetworkManager) Restore() error {
 		m.configured4 = false
 	}
 	return errors.Join(errs...)
+}
+
+func (m *linuxHostNetworkManager) nftApplyScript(udpPort, tcpPort uint16) string {
+	return fmt.Sprintf(`add table ip %[1]s
+add chain ip %[1]s output { type nat hook output priority -100; policy accept; }
+add chain ip %[1]s postrouting { type nat hook postrouting priority 100; policy accept; }
+add rule ip %[1]s output meta mark != 0x%[2]x ip daddr 127.0.0.53 udp dport 53 dnat to 127.0.0.1:%[3]d
+add rule ip %[1]s output meta mark != 0x%[2]x ip daddr 127.0.0.53 tcp dport 53 dnat to 127.0.0.1:%[4]d
+`, m.nftTable, linuxBypassMark, udpPort, tcpPort)
+}
+
+func linuxNFTTableName(device string) string {
+	hash := fnv.New32a()
+	_, _ = hash.Write([]byte(device))
+	return fmt.Sprintf("puppy_tunproxy_%08x", hash.Sum32())
+}
+
+func checkLinuxNFT(script string) error {
+	return runLinuxNFTCommand([]string{"--check", "--file", "-"}, script)
+}
+
+func runLinuxNFT(script string) error {
+	return runLinuxNFTCommand([]string{"--file", "-"}, script)
+}
+
+func runLinuxNFTCommand(args []string, script string) error {
+	path, err := exec.LookPath("nft")
+	if err != nil {
+		return fmt.Errorf("find nft command: %w", err)
+	}
+	command := exec.Command(path, args...)
+	command.Stdin = strings.NewReader(script)
+	out, err := command.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("nft %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 func runLinuxIP(args ...string) error {

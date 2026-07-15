@@ -45,7 +45,8 @@ type Configuration struct {
 	UDPIdleTimeout int `toml:"udp_idle_timeout"`
 	// DNSServer optionally redirects destination-port-53 TCP and UDP DNS
 	// traffic to a fixed IP address and port. UDP DNS is carried to the backend
-	// as DNS over TCP.
+	// as DNS over TCP. On Linux, automatic IPv4 routing also intercepts the
+	// systemd-resolved stub at 127.0.0.53 using nftables.
 	DNSServer string `toml:"dns_server"`
 	// Backend is the legacy single-backend form. It is mutually exclusive with
 	// Backends.

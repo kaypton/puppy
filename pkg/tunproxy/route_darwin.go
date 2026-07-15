@@ -35,11 +35,15 @@ type darwinRoute struct {
 	prefix string
 }
 
-func newHostNetworkManager(device, ipv4Addr, ipv6Addr string, autoRoute bool) hostNetworkManager {
+func newHostNetworkManager(device, ipv4Addr, ipv6Addr string, autoRoute, interceptSystemdResolved bool) hostNetworkManager {
 	return &darwinHostNetworkManager{
 		device: device, ipv4Addr: ipv4Addr, ipv6Addr: ipv6Addr, autoRoute: autoRoute,
 		run: runDarwin, defaultRoute: darwinDefaultRoute, routeIface: darwinRouteInterface,
 	}
+}
+
+func systemdResolvedInterceptionEnabled(autoRoute, dnsConfigured, ipv4Configured bool) bool {
+	return false
 }
 
 func (m *darwinHostNetworkManager) Apply() (dialer common.Dialer, err error) {
@@ -132,6 +136,10 @@ func (m *darwinHostNetworkManager) validateEgress(family, defaultIface string, p
 
 func (m *darwinHostNetworkManager) EgressInterfaces() (string, string) {
 	return m.egress4, m.egress6
+}
+
+func (m *darwinHostNetworkManager) EnableDNSInterception(dnsInterceptHandler) error {
+	return nil
 }
 
 func (m *darwinHostNetworkManager) Restore() error {

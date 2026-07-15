@@ -7,4 +7,7 @@
 // elevated privileges to create the device and modify routing tables. In
 // automatic routing mode, backend sockets are pinned to the physical interface
 // that owned the default route before the TUN routes were installed.
+// On Linux, configuring a DNS server with automatic IPv4 routing also uses
+// nftables to intercept TCP and UDP DNS sent to systemd-resolved at
+// 127.0.0.53 without routing the rest of the loopback address.
 package tunproxy

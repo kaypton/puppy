@@ -260,6 +260,66 @@ func TestDispatcher_ServeUDPDNSFramesAndRoutesTCP(t *testing.T) {
 	}
 }
 
+func TestDispatcher_ResolveInterceptedDNSDatagram(t *testing.T) {
+	upstream, resolver := net.Pipe()
+	t.Cleanup(func() { _ = resolver.Close() })
+	dnsTarget := common.Target{Network: "tcp", Protocol: common.ProtocolDNS, Host: "1.1.1.1", Port: 53}
+	backend := &dialBackend{
+		capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolDNS}},
+		conn:         upstream,
+		targets:      make(chan common.Target, 1),
+	}
+	dispatcher := &dispatcher{
+		backends: []common.Backend{backend},
+		fallback: commonFallback(),
+		dns:      &dnsTarget,
+		ctx:      context.Background(),
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	query := []byte{0x12, 0x34, 0x01, 0x00}
+	wantResponse := []byte{0x12, 0x34, 0x81, 0x80}
+	resolverErr := make(chan error, 1)
+	go func() {
+		frame := make([]byte, len(query)+2)
+		if _, err := io.ReadFull(resolver, frame); err != nil {
+			resolverErr <- err
+			return
+		}
+		if binary.BigEndian.Uint16(frame[:2]) != uint16(len(query)) || !bytes.Equal(frame[2:], query) {
+			resolverErr <- errors.New("unexpected framed query")
+			return
+		}
+		response := make([]byte, len(wantResponse)+2)
+		binary.BigEndian.PutUint16(response, uint16(len(wantResponse)))
+		copy(response[2:], wantResponse)
+		_, err := resolver.Write(response)
+		resolverErr <- err
+	}()
+
+	response, err := dispatcher.resolveInterceptedDNSDatagram(query)
+	if err != nil {
+		t.Fatalf("ResolveInterceptedDNSDatagram: %v", err)
+	}
+	if !bytes.Equal(response, wantResponse) {
+		t.Fatalf("response = %x, want %x", response, wantResponse)
+	}
+	if err := <-resolverErr; err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	select {
+	case target := <-backend.targets:
+		if target != dnsTarget {
+			t.Fatalf("target = %#v, want %#v", target, dnsTarget)
+		}
+	default:
+		t.Fatal("backend target was not recorded")
+	}
+
+	if _, err := dispatcher.resolveInterceptedDNSDatagram(nil); err == nil || !strings.Contains(err.Error(), "empty UDP DNS") {
+		t.Fatalf("empty query error = %v", err)
+	}
+}
+
 type datagramReader struct {
 	messages [][]byte
 	index    int

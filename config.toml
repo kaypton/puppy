@@ -132,6 +132,9 @@ udp_idle_timeout = 30
 # 的 TCP/UDP DNS 流量会重定向到该解析器；UDP 查询会转换为 DNS-over-TCP，
 # 因而也可通过只支持 TCP 的 HTTP CONNECT backend 转发。留空或省略时保持
 # 原有转发行为。为避免 DNS 引导递归，此处不接受主机名。
+# Linux 上同时启用 auto_route 和 ipv4_address 时，还会使用 nft 精确拦截本机
+# 发往 systemd-resolved 127.0.0.53:53 的 TCP/UDP 查询。系统必须安装 nft；
+# auto_route=false、仅配置 IPv6 或 macOS 下不会自动拦截该 loopback 地址。
 # dns_server = "1.1.1.1:53"
 # dns_server = "[2606:4700:4700::1111]:53"
 

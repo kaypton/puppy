@@ -113,8 +113,12 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		}
 	}
 
+	interceptSystemdResolved := systemdResolvedInterceptionEnabled(
+		s.config.AutoRoute, s.dns != nil, s.config.IPv4Address != "",
+	)
 	networkMgr := newHostNetworkManager(
 		device.Name(), s.config.IPv4Address, s.config.IPv6Address, s.config.AutoRoute,
+		interceptSystemdResolved,
 	)
 	dialer, err := networkMgr.Apply()
 	if err != nil {
@@ -136,6 +140,9 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		stackStopped = true
 		dispatcher.wait()
 	}()
+	if err := networkMgr.EnableDNSInterception(dispatcher); err != nil {
+		return fmt.Errorf("tunproxy: enable systemd-resolved interception: %w", err)
+	}
 	pumpErr := ns.startPumps()
 	egress4, egress6 := networkMgr.EgressInterfaces()
 
@@ -145,6 +152,7 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		"ipv6", s.config.IPv6Address,
 		"egress_ipv4_interface", egress4,
 		"egress_ipv6_interface", egress6,
+		"systemd_resolved_intercept", interceptSystemdResolved,
 		"auto_route", s.config.AutoRoute)
 
 	select {

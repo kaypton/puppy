@@ -11,6 +11,10 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// linuxBypassMark identifies sockets created by Puppy itself so the nft
+// OUTPUT rule does not feed backend or resolver traffic back into the TUN.
+const linuxBypassMark = 0x50555059
+
 func newSocketControl(iface4, iface6 string) (socketControl, error) {
 	for _, name := range []string{iface4, iface6} {
 		if name == "" {
@@ -27,13 +31,29 @@ func newSocketControl(iface4, iface6 string) (socketControl, error) {
 		}
 		var controlErr error
 		if err := c.Control(func(fd uintptr) {
-			controlErr = unix.BindToDevice(int(fd), iface)
+			controlErr = configureLinuxSocket(
+				int(fd), iface,
+				unix.BindToDevice,
+				func(fd, mark int) error {
+					return unix.SetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_MARK, mark)
+				},
+			)
 		}); err != nil {
 			return fmt.Errorf("tunproxy: access socket for interface binding: %w", err)
 		}
 		if controlErr != nil {
-			return fmt.Errorf("tunproxy: bind socket to interface %s: %w", iface, controlErr)
+			return fmt.Errorf("tunproxy: configure egress socket: %w", controlErr)
 		}
 		return nil
 	}, nil
+}
+
+func configureLinuxSocket(fd int, iface string, bind func(int, string) error, mark func(int, int) error) error {
+	if err := bind(fd, iface); err != nil {
+		return fmt.Errorf("bind socket to interface %s: %w", iface, err)
+	}
+	if err := mark(fd, linuxBypassMark); err != nil {
+		return fmt.Errorf("mark socket for TUN bypass: %w", err)
+	}
+	return nil
 }

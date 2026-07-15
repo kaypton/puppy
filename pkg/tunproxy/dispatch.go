@@ -218,6 +218,86 @@ func (d *dispatcher) serveUDPDNS(frontend io.ReadWriteCloser, originalTarget, ta
 	wg.Wait()
 }
 
+// serveInterceptedDNSStream forwards a TCP DNS connection redirected from the
+// systemd-resolved stub to the configured DNS target.
+func (d *dispatcher) serveInterceptedDNSStream(frontend io.ReadWriteCloser) {
+	if d.dns == nil {
+		d.logger.Error("tunproxy: systemd-resolved tcp dns interception has no configured target")
+		return
+	}
+	target := *d.dns
+	backend, backendIndex, fallback := d.selectBackend(target)
+	d.logger.Info("tunproxy: systemd-resolved tcp dns route selected", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback)
+	upstream, err := backend.Dial(d.ctx, target, d.dialer)
+	if err != nil {
+		d.logger.Info("tunproxy: systemd-resolved tcp dns backend dial failed", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback, "err", err)
+		return
+	}
+	defer upstream.Close()
+
+	s, err := shim.NewShimServer(shim.ShimServerConfiguration{
+		Frontend:   frontend,
+		Backend:    upstream,
+		BufferSize: d.shimBuf,
+	})
+	if err != nil {
+		d.logger.Error("tunproxy: systemd-resolved tcp dns shim construction failed", "target", target.Address(), "err", err)
+		return
+	}
+	_ = s.Run(d.ctx)
+}
+
+// resolveInterceptedDNSDatagram carries one redirected UDP DNS query over a
+// DNS-over-TCP backend connection and returns its single response datagram.
+func (d *dispatcher) resolveInterceptedDNSDatagram(query []byte) ([]byte, error) {
+	if d.dns == nil {
+		return nil, errors.New("systemd-resolved DNS interception has no configured target")
+	}
+	if len(query) == 0 {
+		return nil, errors.New("empty UDP DNS message")
+	}
+	if len(query) > maxDNSMessageSize {
+		return nil, errors.New("UDP DNS message exceeds maximum size")
+	}
+	target := *d.dns
+	backend, backendIndex, fallback := d.selectBackend(target)
+	d.logger.Info("tunproxy: systemd-resolved udp dns route selected", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback)
+	upstream, err := backend.Dial(d.ctx, target, d.dialer)
+	if err != nil {
+		return nil, err
+	}
+	defer upstream.Close()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-d.ctx.Done():
+			_ = upstream.Close()
+		case <-done:
+		}
+	}()
+
+	frame := make([]byte, 2+len(query))
+	binary.BigEndian.PutUint16(frame, uint16(len(query)))
+	copy(frame[2:], query)
+	if err := writeFull(upstream, frame); err != nil {
+		return nil, err
+	}
+	var length [2]byte
+	if _, err := io.ReadFull(upstream, length[:]); err != nil {
+		return nil, err
+	}
+	size := int(binary.BigEndian.Uint16(length[:]))
+	if size == 0 {
+		return nil, errors.New("empty TCP DNS message")
+	}
+	response := make([]byte, size)
+	if _, err := io.ReadFull(upstream, response); err != nil {
+		return nil, err
+	}
+	return response, nil
+}
+
 // redirectDNS replaces a destination-port-53 target with the configured
 // fixed DNS-over-TCP resolver.
 func (d *dispatcher) redirectDNS(target common.Target) (common.Target, bool) {
