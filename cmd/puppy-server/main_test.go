@@ -223,6 +223,35 @@ func TestLoadConfiguration_TLSBackend(t *testing.T) {
 	}
 }
 
+func TestLoadConfiguration_TUNOrderedBackends(t *testing.T) {
+	contents := strings.Replace(
+		validConfiguration,
+		`backend = "direct_out"
+shim = "default_tunnel"
+
+[backends.direct_out]`,
+		`backends = ["corporate_proxy", "direct_out"]
+fallback = "direct_out"
+protocol_detect_timeout = 2
+protocol_detect_max_bytes = 8192
+shim = "default_tunnel"
+
+[backends.direct_out]`,
+		1,
+	)
+	config, err := loadConfiguration(writeConfig(t, contents))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+	tun := config.Frontends["unused_tun"].Configuration.(frontendtunproxy.Configuration)
+	if got := tun.BackendReferences(); len(got) != 2 || got[0] != "corporate_proxy" || got[1] != "direct_out" {
+		t.Fatalf("TUN backend order = %v", got)
+	}
+	if tun.Fallback != "direct_out" || tun.ProtocolDetectTimeout != 2 || tun.ProtocolDetectMaxBytes != 8192 {
+		t.Fatalf("TUN routing configuration = %#v", tun)
+	}
+}
+
 func TestLoadConfigurationErrors(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -391,6 +420,59 @@ func TestBuildSelectedFrontend(t *testing.T) {
 	}
 	if frontend == nil {
 		t.Fatal("buildFrontend returned nil")
+	}
+}
+
+func TestBuildSelectedTUNFrontend(t *testing.T) {
+	contents := strings.Replace(validConfiguration, `frontend = "office_proxy"`, `frontend = "unused_tun"`, 1)
+	contents = strings.Replace(
+		contents,
+		`backend = "direct_out"
+shim = "default_tunnel"
+
+[backends.direct_out]`,
+		`backends = ["corporate_proxy"]
+fallback = "direct_out"
+shim = "default_tunnel"
+
+[backends.direct_out]`,
+		1,
+	)
+	config, err := loadConfiguration(writeConfig(t, contents))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+	frontend, err := buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("buildFrontend: %v", err)
+	}
+	if frontend == nil {
+		t.Fatal("buildFrontend returned nil")
+	}
+}
+
+func TestBuildSelectedTUNFrontendRejectsNarrowFallback(t *testing.T) {
+	contents := strings.Replace(validConfiguration, `frontend = "office_proxy"`, `frontend = "unused_tun"`, 1)
+	contents = strings.Replace(
+		contents,
+		`backend = "direct_out"
+shim = "default_tunnel"
+
+[backends.direct_out]`,
+		`backend = "direct_out"
+fallback = "corporate_proxy"
+shim = "default_tunnel"
+
+[backends.direct_out]`,
+		1,
+	)
+	config, err := loadConfiguration(writeConfig(t, contents))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+	_, err = buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err == nil || !strings.Contains(err.Error(), "fallback must support udp") {
+		t.Fatalf("buildFrontend error = %v, want fallback UDP capability error", err)
 	}
 }
 

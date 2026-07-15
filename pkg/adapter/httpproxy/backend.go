@@ -90,6 +90,12 @@ func NewBackend(config BackendConfiguration) (*Backend, error) {
 	return &Backend{config: config, logger: logger, tlsConfig: tlsConfig}, nil
 }
 
+// Capabilities reports that HTTP CONNECT can tunnel any TCP application
+// protocol, but cannot carry UDP.
+func (b *Backend) Capabilities() []common.Capability {
+	return []common.Capability{{Network: "tcp", Protocol: common.ProtocolAny}}
+}
+
 // buildClientTLSConfig constructs a *tls.Config for the upstream proxy
 // connection.
 func buildClientTLSConfig(proxyAddress, serverName, caFile string, insecure bool) (*tls.Config, error) {

@@ -30,8 +30,18 @@ import (
 // errorBackend is a common.Backend whose Dial always returns err.
 type errorBackend struct{ err error }
 
+func (b *errorBackend) Capabilities() []common.Capability {
+	return []common.Capability{{Network: "tcp", Protocol: common.ProtocolAny}}
+}
+
 func (b *errorBackend) Dial(ctx context.Context, target common.Target, dialer common.Dialer) (io.ReadWriteCloser, error) {
 	return nil, b.err
+}
+
+type udpOnlyBackend struct{ errorBackend }
+
+func (b *udpOnlyBackend) Capabilities() []common.Capability {
+	return []common.Capability{{Network: "udp", Protocol: common.ProtocolAny}}
 }
 
 func testCertificateFiles(t *testing.T) (certFile, keyFile string, roots *x509.CertPool) {
@@ -170,6 +180,7 @@ func TestNewServer_Validation(t *testing.T) {
 		{"missing address", ServerConfiguration{ListenPort: 1, Backend: validBackend}, "listen address"},
 		{"missing port", ServerConfiguration{ListenAddress: "127.0.0.1", Backend: validBackend}, "listen port"},
 		{"missing backend", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1}, "backend is required"},
+		{"backend lacks TCP unknown", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: &udpOnlyBackend{}}, "backend must support tcp"},
 		{"certificate only", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend, TLSCertFile: "proxy-cert.pem"}, "certificate and key files"},
 		{"key only", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend, TLSKeyFile: "proxy-key.pem"}, "certificate and key files"},
 		{"username only", ServerConfiguration{ListenAddress: "127.0.0.1", ListenPort: 1, Backend: validBackend, Username: "u"}, "username and password"},

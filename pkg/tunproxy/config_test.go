@@ -70,7 +70,36 @@ func TestConfiguration_Validate(t *testing.T) {
 				IPv4Address: "10.0.0.1/24",
 				Shim:        "s",
 			},
-			wantErr: "backend reference is required",
+			wantErr: "backend or backends reference is required",
+		},
+		{
+			name: "backend and backends conflict",
+			cfg: Configuration{
+				IPv4Address: "10.0.0.1/24",
+				Backend:     "b",
+				Backends:    []string{"b2"},
+				Shim:        "s",
+			},
+			wantErr: "backend and backends are mutually exclusive",
+		},
+		{
+			name: "duplicate backends",
+			cfg: Configuration{
+				IPv4Address: "10.0.0.1/24",
+				Backends:    []string{"b", "b"},
+				Shim:        "s",
+			},
+			wantErr: "duplicate reference",
+		},
+		{
+			name: "negative protocol timeout",
+			cfg: Configuration{
+				IPv4Address:           "10.0.0.1/24",
+				Backends:              []string{"b"},
+				ProtocolDetectTimeout: -1,
+				Shim:                  "s",
+			},
+			wantErr: "protocol_detect_timeout must not be negative",
 		},
 		{
 			name: "missing shim",
@@ -131,24 +160,43 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 	autoRoute := false
 	t.Run("default udp idle and auto_route", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", Backend: "b", Shim: "s"}
-		sc := cfg.ServerConfig(nil, 0, nil)
+		sc := cfg.ServerConfig(nil, nil, 0, nil)
 		if sc.UDPIdleTimeout != defaultUDPIdle {
 			t.Fatalf("UDPIdleTimeout = %v, want %v", sc.UDPIdleTimeout, defaultUDPIdle)
 		}
 		if !sc.AutoRoute {
 			t.Fatal("AutoRoute should default to true")
 		}
+		if sc.ProtocolDetectTimeout != defaultProtocolDetectTimeout || sc.ProtocolDetectMaxBytes != defaultProtocolDetectMaxBytes {
+			t.Fatalf("protocol detection defaults = (%v, %d)", sc.ProtocolDetectTimeout, sc.ProtocolDetectMaxBytes)
+		}
+	})
+	t.Run("ordered backends and explicit detection limits", func(t *testing.T) {
+		cfg := Configuration{
+			IPv4Address:            "10.0.0.1/24",
+			Backends:               []string{"first", "second"},
+			ProtocolDetectTimeout:  3,
+			ProtocolDetectMaxBytes: 4096,
+			Shim:                   "s",
+		}
+		if got := cfg.BackendReferences(); len(got) != 2 || got[0] != "first" || got[1] != "second" {
+			t.Fatalf("BackendReferences = %v", got)
+		}
+		sc := cfg.ServerConfig(nil, nil, 0, nil)
+		if sc.ProtocolDetectTimeout != 3*time.Second || sc.ProtocolDetectMaxBytes != 4096 {
+			t.Fatalf("protocol detection = (%v, %d)", sc.ProtocolDetectTimeout, sc.ProtocolDetectMaxBytes)
+		}
 	})
 	t.Run("explicit auto_route false", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", AutoRoute: &autoRoute, Backend: "b", Shim: "s"}
-		sc := cfg.ServerConfig(nil, 0, nil)
+		sc := cfg.ServerConfig(nil, nil, 0, nil)
 		if sc.AutoRoute {
 			t.Fatal("AutoRoute should be false when explicitly set")
 		}
 	})
 	t.Run("explicit udp idle", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", UDPIdleTimeout: 10, Backend: "b", Shim: "s"}
-		sc := cfg.ServerConfig(nil, 0, nil)
+		sc := cfg.ServerConfig(nil, nil, 0, nil)
 		if sc.UDPIdleTimeout != 10*time.Second {
 			t.Fatalf("UDPIdleTimeout = %v, want 10s", sc.UDPIdleTimeout)
 		}

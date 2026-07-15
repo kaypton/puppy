@@ -13,15 +13,18 @@ import (
 
 // ServerConfiguration configures a TUN proxy server.
 type ServerConfiguration struct {
-	DeviceName     string
-	IPv4Address    string
-	IPv6Address    string
-	MTU            uint32
-	AutoRoute      bool
-	UDPIdleTimeout time.Duration
-	Backend        common.Backend
-	ShimBufferSize int
-	Logger         *slog.Logger
+	DeviceName             string
+	IPv4Address            string
+	IPv6Address            string
+	MTU                    uint32
+	AutoRoute              bool
+	UDPIdleTimeout         time.Duration
+	Backends               []common.Backend
+	Fallback               common.Backend
+	ProtocolDetectTimeout  time.Duration
+	ProtocolDetectMaxBytes int
+	ShimBufferSize         int
+	Logger                 *slog.Logger
 }
 
 // Server is a TUN-mode proxy frontend. It opens a virtual TUN device, runs a
@@ -37,11 +40,30 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	if err := validateAddresses(config.IPv4Address, config.IPv6Address); err != nil {
 		return nil, fmt.Errorf("tunproxy: %w", err)
 	}
-	if config.Backend == nil {
-		return nil, errors.New("tunproxy: backend is required")
+	if len(config.Backends) == 0 {
+		return nil, errors.New("tunproxy: at least one backend is required")
+	}
+	for _, backend := range config.Backends {
+		if backend == nil {
+			return nil, errors.New("tunproxy: backends must not contain nil")
+		}
+	}
+	if config.Fallback == nil {
+		return nil, errors.New("tunproxy: fallback is required")
+	}
+	for _, network := range []string{"tcp", "udp"} {
+		if !common.SupportsAnyProtocol(config.Fallback.Capabilities(), network) {
+			return nil, fmt.Errorf("tunproxy: fallback must support %s with any application protocol", network)
+		}
 	}
 	if config.UDPIdleTimeout <= 0 {
 		config.UDPIdleTimeout = defaultUDPIdle
+	}
+	if config.ProtocolDetectTimeout <= 0 {
+		config.ProtocolDetectTimeout = defaultProtocolDetectTimeout
+	}
+	if config.ProtocolDetectMaxBytes <= 0 {
+		config.ProtocolDetectMaxBytes = defaultProtocolDetectMaxBytes
 	}
 	logger := config.Logger
 	if logger == nil {
@@ -93,7 +115,7 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("tunproxy: configure host network: %w", err)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	dispatcher := newDispatcher(runCtx, ns, s.config.Backend, dialer, s.config.ShimBufferSize, s.config.UDPIdleTimeout, s.logger)
+	dispatcher := newDispatcher(runCtx, ns, s.config.Backends, s.config.Fallback, dialer, s.config.ShimBufferSize, s.config.UDPIdleTimeout, s.config.ProtocolDetectTimeout, s.config.ProtocolDetectMaxBytes, s.logger)
 	ns.handler = dispatcher
 	defer func() {
 		// Restore host routing before waiting for sessions. In particular, UDP

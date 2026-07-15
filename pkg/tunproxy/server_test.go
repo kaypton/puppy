@@ -17,16 +17,18 @@ import (
 
 func TestNewServer_Validation(t *testing.T) {
 	backend := direct.NewBackend()
+	fallback := direct.NewBackend()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	cases := []struct {
 		name    string
 		cfg     ServerConfiguration
 		wantErr string
 	}{
-		{"missing addresses", ServerConfiguration{Backend: backend, Logger: logger}, "ipv4_address or ipv6_address is required"},
-		{"IPv4 field contains IPv6", ServerConfiguration{IPv4Address: "fd00::1/64", Backend: backend, Logger: logger}, "ipv4_address must contain an IPv4 address"},
-		{"missing backend", ServerConfiguration{IPv4Address: "10.0.0.1/24", Logger: logger}, "backend is required"},
-		{"valid", ServerConfiguration{IPv4Address: "10.0.0.1/24", Backend: backend, Logger: logger}, ""},
+		{"missing addresses", ServerConfiguration{Backends: []common.Backend{backend}, Fallback: fallback, Logger: logger}, "ipv4_address or ipv6_address is required"},
+		{"IPv4 field contains IPv6", ServerConfiguration{IPv4Address: "fd00::1/64", Backends: []common.Backend{backend}, Fallback: fallback, Logger: logger}, "ipv4_address must contain an IPv4 address"},
+		{"missing backend", ServerConfiguration{IPv4Address: "10.0.0.1/24", Fallback: fallback, Logger: logger}, "at least one backend is required"},
+		{"fallback not catch all", ServerConfiguration{IPv4Address: "10.0.0.1/24", Backends: []common.Backend{backend}, Fallback: errorBackend{}, Logger: logger}, "fallback must support udp"},
+		{"valid", ServerConfiguration{IPv4Address: "10.0.0.1/24", Backends: []common.Backend{backend}, Fallback: fallback, Logger: logger}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -50,7 +52,8 @@ func TestNewServer_Validation(t *testing.T) {
 func TestNewServer_DefaultsUDPIdle(t *testing.T) {
 	cfg := ServerConfiguration{
 		IPv4Address: "10.0.0.1/24",
-		Backend:     direct.NewBackend(),
+		Backends:    []common.Backend{direct.NewBackend()},
+		Fallback:    direct.NewBackend(),
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	}
 	s, err := NewServer(cfg)
@@ -123,7 +126,8 @@ func TestServer_RunRequiresRoot(t *testing.T) {
 	}
 	s, err := NewServer(ServerConfiguration{
 		IPv4Address: "10.0.0.1/24",
-		Backend:     direct.NewBackend(),
+		Backends:    []common.Backend{direct.NewBackend()},
+		Fallback:    direct.NewBackend(),
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -141,7 +145,8 @@ func TestServer_RunContextCancelWithoutRoot(t *testing.T) {
 	}
 	s, err := NewServer(ServerConfiguration{
 		IPv4Address: "10.0.0.1/24",
-		Backend:     direct.NewBackend(),
+		Backends:    []common.Backend{direct.NewBackend()},
+		Fallback:    direct.NewBackend(),
 		Logger:      slog.New(slog.NewTextHandler(io.Discard, nil)),
 	})
 	if err != nil {
@@ -167,6 +172,10 @@ var _ sessionHandler = (*dispatcher)(nil)
 // errorBackend is a common.Backend whose Dial always fails, used to exercise
 // dispatcher behavior without a real upstream.
 type errorBackend struct{}
+
+func (errorBackend) Capabilities() []common.Capability {
+	return []common.Capability{{Network: "tcp", Protocol: common.ProtocolAny}}
+}
 
 func (errorBackend) Dial(context.Context, common.Target, common.Dialer) (io.ReadWriteCloser, error) {
 	return nil, errors.New("unreachable")

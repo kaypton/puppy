@@ -227,8 +227,15 @@ func (c *configuration) validate() error {
 			if err := frontendConfig.Validate(); err != nil {
 				return fmt.Errorf("frontend %q: %w", name, err)
 			}
-			if _, ok := c.Backends[frontendConfig.Backend]; !ok {
-				return fmt.Errorf("frontend %q: backend %q does not exist", name, frontendConfig.Backend)
+			for _, backendName := range frontendConfig.BackendReferences() {
+				if _, ok := c.Backends[backendName]; !ok {
+					return fmt.Errorf("frontend %q: backend %q does not exist", name, backendName)
+				}
+			}
+			if frontendConfig.Fallback != "" {
+				if _, ok := c.Backends[frontendConfig.Fallback]; !ok {
+					return fmt.Errorf("frontend %q: fallback backend %q does not exist", name, frontendConfig.Fallback)
+				}
 			}
 			if _, ok := c.Shims[frontendConfig.Shim]; !ok {
 				return fmt.Errorf("frontend %q: shim %q does not exist", name, frontendConfig.Shim)
@@ -299,12 +306,25 @@ func buildFrontend(config *configuration, logger *slog.Logger) (frontendRunner, 
 		if !ok {
 			return nil, fmt.Errorf("build frontend %q: configuration does not match type %q", config.Frontend, group.Type)
 		}
-		backend, err := buildBackend(config.Backends[frontendConfig.Backend], logger)
-		if err != nil {
-			return nil, fmt.Errorf("build backend %q: %w", frontendConfig.Backend, err)
+		backendNames := frontendConfig.BackendReferences()
+		backends := make([]common.Backend, 0, len(backendNames))
+		for _, backendName := range backendNames {
+			backend, err := buildBackend(config.Backends[backendName], logger)
+			if err != nil {
+				return nil, fmt.Errorf("build backend %q: %w", backendName, err)
+			}
+			backends = append(backends, backend)
+		}
+		fallback := common.Backend(direct.NewBackend())
+		if frontendConfig.Fallback != "" {
+			var err error
+			fallback, err = buildBackend(config.Backends[frontendConfig.Fallback], logger)
+			if err != nil {
+				return nil, fmt.Errorf("build fallback backend %q: %w", frontendConfig.Fallback, err)
+			}
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
-		frontend, err := frontendtunproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger))
+		frontend, err := frontendtunproxy.NewServer(frontendConfig.ServerConfig(backends, fallback, shimConfig.BufferSize, logger))
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}

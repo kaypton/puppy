@@ -2,6 +2,7 @@ package tunproxy
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/puppy/pkg/adapter/direct"
 	"github.com/puppy/pkg/common"
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
@@ -23,8 +25,22 @@ type blockingBackend struct {
 	once    sync.Once
 }
 
+type capabilityBackend struct {
+	capabilities []common.Capability
+}
+
+func (b *capabilityBackend) Capabilities() []common.Capability { return b.capabilities }
+
+func (b *capabilityBackend) Dial(context.Context, common.Target, common.Dialer) (io.ReadWriteCloser, error) {
+	return nil, errors.New("not used")
+}
+
 func newBlockingBackend() *blockingBackend {
 	return &blockingBackend{started: make(chan struct{}), extra: make(chan struct{}, 1)}
+}
+
+func (b *blockingBackend) Capabilities() []common.Capability {
+	return []common.Capability{{Network: "udp", Protocol: common.ProtocolAny}}
 }
 
 func (b *blockingBackend) Dial(ctx context.Context, target common.Target, dialer common.Dialer) (io.ReadWriteCloser, error) {
@@ -54,7 +70,7 @@ func TestDispatcher_HandleUDPRegistersFlowBeforeBackendDial(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	backend := newBlockingBackend()
 	dispatcher := newDispatcher(
-		ctx, ns, backend, nil, 0, time.Second,
+		ctx, ns, []common.Backend{backend}, commonFallback(), nil, 0, time.Second, time.Second, defaultProtocolDetectMaxBytes,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	ns.handler = dispatcher
@@ -90,6 +106,46 @@ func TestDispatcher_HandleUDPRegistersFlowBeforeBackendDial(t *testing.T) {
 		t.Fatal("dispatcher did not stop after cancellation")
 	}
 }
+
+func TestDispatcher_SelectBackendByPriorityAndProtocol(t *testing.T) {
+	httpBackend := &capabilityBackend{capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolHTTP}}}
+	tlsBackend := &capabilityBackend{capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolTLS}}}
+	wildcardBackend := &capabilityBackend{capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolAny}}}
+	fallback := direct.NewBackend()
+	dispatcher := &dispatcher{
+		backends: []common.Backend{httpBackend, tlsBackend, wildcardBackend},
+		fallback: fallback,
+	}
+
+	tests := []struct {
+		name      string
+		target    common.Target
+		want      common.Backend
+		wantIndex int
+		fallback  bool
+	}{
+		{"HTTP uses first", common.Target{Network: "tcp", Protocol: common.ProtocolHTTP}, httpBackend, 0, false},
+		{"TLS uses second", common.Target{Network: "tcp", Protocol: common.ProtocolTLS}, tlsBackend, 1, false},
+		{"unknown uses wildcard", common.Target{Network: "tcp", Protocol: common.ProtocolUnknown}, wildcardBackend, 2, false},
+		{"UDP uses fallback", common.Target{Network: "udp", Protocol: common.ProtocolUnknown}, fallback, -1, true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got, index, usedFallback := dispatcher.selectBackend(test.target)
+			if got != test.want || index != test.wantIndex || usedFallback != test.fallback {
+				t.Fatalf("selectBackend() = (%T, %d, %t), want (%T, %d, %t)", got, index, usedFallback, test.want, test.wantIndex, test.fallback)
+			}
+		})
+	}
+
+	got, index, usedFallback := dispatcher.selectTCPBackend(common.Target{Network: "tcp"})
+	if got != httpBackend || index != 0 || usedFallback {
+		t.Fatalf("selectTCPBackend() = (%T, %d, %t), want first restricted backend", got, index, usedFallback)
+	}
+}
+
+func commonFallback() common.Backend { return direct.NewBackend() }
 
 func injectIPv4UDP(t *testing.T, ns *networkStack, payload []byte) {
 	t.Helper()

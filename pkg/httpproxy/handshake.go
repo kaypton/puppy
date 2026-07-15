@@ -87,7 +87,7 @@ func (s *Server) handshake(conn net.Conn) (target common.Target, frontend io.Rea
 		return common.Target{}, nil, fmt.Errorf("invalid port %q: %w", portStr, perr)
 	}
 
-	return common.Target{Network: "tcp", Host: host, Port: uint16(port)}, &bufferedConn{r: reader, Conn: conn}, nil
+	return common.Target{Network: "tcp", Protocol: common.ProtocolUnknown, Host: host, Port: uint16(port)}, &bufferedConn{r: reader, Conn: conn}, nil
 }
 
 // writeCamouflageError makes rejected requests resemble responses from a

@@ -108,3 +108,12 @@ func TestDirectDial_NetworkDefaultsTCP(t *testing.T) {
 		t.Fatalf("echo = %q, want %q", got, msg)
 	}
 }
+
+func TestBackendCapabilities(t *testing.T) {
+	capabilities := NewBackend().Capabilities()
+	for _, network := range []string{"tcp", "udp"} {
+		if !common.SupportsAnyProtocol(capabilities, network) {
+			t.Fatalf("direct backend should support %s with any protocol", network)
+		}
+	}
+}

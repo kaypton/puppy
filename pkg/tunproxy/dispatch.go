@@ -16,27 +16,33 @@ import (
 // dispatcher implements sessionHandler. It accepts TCP/UDP sessions from the
 // netstack and forwards them to a common.Backend.
 type dispatcher struct {
-	ns      *networkStack
-	backend common.Backend
-	dialer  common.Dialer
-	shimBuf int
-	udpIdle time.Duration
-	logger  *slog.Logger
-	ctx     context.Context
-	wg      sync.WaitGroup
+	ns             *networkStack
+	backends       []common.Backend
+	fallback       common.Backend
+	dialer         common.Dialer
+	shimBuf        int
+	udpIdle        time.Duration
+	detectTimeout  time.Duration
+	detectMaxBytes int
+	logger         *slog.Logger
+	ctx            context.Context
+	wg             sync.WaitGroup
 }
 
 // newDispatcher creates a dispatcher bound to the given context. Run must be
 // cancelled to release in-flight sessions.
-func newDispatcher(ctx context.Context, ns *networkStack, backend common.Backend, dialer common.Dialer, shimBuf int, udpIdle time.Duration, logger *slog.Logger) *dispatcher {
+func newDispatcher(ctx context.Context, ns *networkStack, backends []common.Backend, fallback common.Backend, dialer common.Dialer, shimBuf int, udpIdle, detectTimeout time.Duration, detectMaxBytes int, logger *slog.Logger) *dispatcher {
 	return &dispatcher{
-		ns:      ns,
-		backend: backend,
-		dialer:  dialer,
-		shimBuf: shimBuf,
-		udpIdle: udpIdle,
-		logger:  logger,
-		ctx:     ctx,
+		ns:             ns,
+		backends:       backends,
+		fallback:       fallback,
+		dialer:         dialer,
+		shimBuf:        shimBuf,
+		udpIdle:        udpIdle,
+		detectTimeout:  detectTimeout,
+		detectMaxBytes: detectMaxBytes,
+		logger:         logger,
+		ctx:            ctx,
 	}
 }
 
@@ -55,27 +61,40 @@ func (d *dispatcher) HandleTCP(req *tcp.ForwarderRequest) {
 }
 
 func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
-	upstream, err := d.backend.Dial(d.ctx, target, d.dialer)
-	if err != nil {
-		d.logger.Info("tunproxy: tcp backend dial failed", "target", target.Address(), "err", err)
-		req.Complete(true) // send RST
-		return
-	}
-
 	frontend, err := d.ns.endpointFromTCPRequest(req)
 	if err != nil {
 		d.logger.Info("tunproxy: tcp endpoint creation failed", "target", target.Address(), "err", err)
-		_ = upstream.Close()
 		req.Complete(true)
 		return
 	}
+	var frontendConn io.ReadWriteCloser = frontend
+	backend, backendIndex, fallback := d.selectTCPBackend(target)
+	if backendIndex >= 0 && !common.SupportsAnyProtocol(backend.Capabilities(), "tcp") {
+		target.Protocol, frontendConn, err = detectProtocol(d.ctx, frontend, d.detectTimeout, d.detectMaxBytes)
+		if err != nil {
+			d.logger.Info("tunproxy: tcp protocol detection failed", "target", target.Address(), "err", err)
+			_ = frontend.Close()
+			return
+		}
+		backend, backendIndex, fallback = d.selectBackend(target)
+	} else {
+		target.Protocol = common.ProtocolUnknown
+	}
+	d.logger.Info("tunproxy: tcp route selected", "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback)
+
+	upstream, err := backend.Dial(d.ctx, target, d.dialer)
+	if err != nil {
+		d.logger.Info("tunproxy: tcp backend dial failed", "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback, "err", err)
+		_ = frontendConn.Close()
+		return
+	}
 	defer func() {
-		_ = frontend.Close()
+		_ = frontendConn.Close()
 		_ = upstream.Close()
 	}()
 
 	s, err := shim.NewShimServer(shim.ShimServerConfiguration{
-		Frontend:   frontend,
+		Frontend:   frontendConn,
 		Backend:    upstream,
 		BufferSize: d.shimBuf,
 	})
@@ -111,9 +130,12 @@ func (d *dispatcher) HandleUDP(req *udp.ForwarderRequest) {
 
 func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target) {
 	defer frontend.Close()
-	upstream, err := d.backend.Dial(d.ctx, target, d.dialer)
+	target.Protocol = common.ProtocolUnknown
+	backend, backendIndex, fallback := d.selectBackend(target)
+	d.logger.Info("tunproxy: udp route selected", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback)
+	upstream, err := backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
-		d.logger.Info("tunproxy: udp backend dial failed", "target", target.Address(), "err", err)
+		d.logger.Info("tunproxy: udp backend dial failed", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback, "err", err)
 		return
 	}
 	defer upstream.Close()
@@ -165,6 +187,24 @@ func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target)
 		_ = frontend.Close()
 	}()
 	wg.Wait()
+}
+
+func (d *dispatcher) selectTCPBackend(target common.Target) (common.Backend, int, bool) {
+	for index, backend := range d.backends {
+		if common.SupportsNetwork(backend.Capabilities(), "tcp") {
+			return backend, index, false
+		}
+	}
+	return d.fallback, -1, true
+}
+
+func (d *dispatcher) selectBackend(target common.Target) (common.Backend, int, bool) {
+	for index, backend := range d.backends {
+		if common.Supports(backend.Capabilities(), target) {
+			return backend, index, false
+		}
+	}
+	return d.fallback, -1, true
 }
 
 // pipeUDP copies from src to dst, signaling idleReset on each successful

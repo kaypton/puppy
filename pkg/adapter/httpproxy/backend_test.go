@@ -160,6 +160,17 @@ func TestNewBackend_Validation(t *testing.T) {
 	}
 }
 
+func TestBackendCapabilities(t *testing.T) {
+	b := &Backend{}
+	capabilities := b.Capabilities()
+	if !common.SupportsAnyProtocol(capabilities, "tcp") {
+		t.Fatal("HTTP CONNECT backend should support any TCP application protocol")
+	}
+	if common.SupportsNetwork(capabilities, "udp") {
+		t.Fatal("HTTP CONNECT backend should not support UDP")
+	}
+}
+
 func TestBackend_ChainThroughHTTPProxy(t *testing.T) {
 	echoAddr := echoServer(t)
 	proxyAddr := miniProxy(t, "", "")

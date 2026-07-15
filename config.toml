@@ -128,8 +128,20 @@ auto_route = true
 # 省略或 <=0 时使用默认值 30 秒。
 udp_idle_timeout = 30
 
-# backend 指定此 frontend 使用的 backend 配置组名称。
-backend = "direct_out"
+# backends 按优先级指定候选 backend。本例保持直接转发；如需让 TCP 通过
+# 上游 HTTP CONNECT proxy，可改为 ["upstream_http_proxy"]，不支持的 UDP
+# 会继续交给下方 fallback。拨号失败不会触发 fallback。
+# 为兼容旧配置，也可只使用 backend = "direct_out"；两种写法不能并存。
+backends = ["direct_out"]
+
+# fallback 在所有候选 backend 都不支持当前流量时使用；省略时默认为内置 direct。
+# 显式 fallback 必须能处理任意 TCP/UDP 应用协议。
+fallback = "direct_out"
+
+# TCP 应用协议探测的最长等待秒数与最大缓存字节数。探测会识别 HTTP/1、
+# HTTP/2 client preface 和 TLS ClientHello，并将缓存内容完整回放给隧道。
+protocol_detect_timeout = 1
+protocol_detect_max_bytes = 16384
 
 # shim 指定此 frontend 使用的 shim 配置组名称。
 shim = "default_tunnel"

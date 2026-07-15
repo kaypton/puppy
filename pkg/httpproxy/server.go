@@ -76,6 +76,9 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	if config.Backend == nil {
 		return nil, errors.New("httpproxy: backend is required")
 	}
+	if !common.Supports(config.Backend.Capabilities(), common.Target{Network: "tcp", Protocol: common.ProtocolUnknown}) {
+		return nil, errors.New("httpproxy: backend must support tcp with unknown application protocol")
+	}
 	if config.EgressDialer == nil {
 		config.EgressDialer = common.SystemDialer()
 	}
