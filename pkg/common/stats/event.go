@@ -20,10 +20,6 @@ const (
 	EventConfigReloaded EventType = "config_reloaded"
 	// EventConfigReloadFailed is published when a hot reload fails.
 	EventConfigReloadFailed EventType = "config_reload_failed"
-	// EventFrontendStopped is published when a frontend is stopped.
-	EventFrontendStopped EventType = "frontend_stopped"
-	// EventFrontendStarted is published when a frontend is started.
-	EventFrontendStarted EventType = "frontend_started"
 	// EventShutdown is published when a graceful shutdown is requested.
 	EventShutdown EventType = "shutdown"
 )
@@ -53,6 +49,7 @@ const subscriberBufferSize = 256
 type subscriber struct {
 	ch     chan Event
 	cancel context.CancelFunc
+	filter map[EventType]struct{}
 }
 
 // EventBus broadcasts Events to multiple subscribers. Subscribers receive
@@ -69,9 +66,11 @@ func NewEventBus() *EventBus {
 }
 
 // Subscribe returns a channel that receives events until ctx is cancelled or
-// the bus is closed. The caller should drain the channel promptly; a full
-// buffer causes events to be dropped (not blocked).
-func (b *EventBus) Subscribe(ctx context.Context) <-chan Event {
+// the bus is closed. When types is non-empty, only events whose Type matches
+// one of the given types are delivered. When types is empty, all events are
+// delivered. The caller should drain the channel promptly; a full buffer
+// causes events to be dropped (not blocked).
+func (b *EventBus) Subscribe(ctx context.Context, types ...EventType) <-chan Event {
 	if b == nil {
 		ch := make(chan Event)
 		close(ch)
@@ -79,6 +78,12 @@ func (b *EventBus) Subscribe(ctx context.Context) <-chan Event {
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	sub := &subscriber{ch: make(chan Event, subscriberBufferSize), cancel: cancel}
+	if len(types) > 0 {
+		sub.filter = make(map[EventType]struct{}, len(types))
+		for _, t := range types {
+			sub.filter[t] = struct{}{}
+		}
+	}
 	b.mu.Lock()
 	b.subscribers[sub] = struct{}{}
 	b.mu.Unlock()
@@ -94,8 +99,9 @@ func (b *EventBus) Subscribe(ctx context.Context) <-chan Event {
 	return sub.ch
 }
 
-// Publish broadcasts an event to all subscribers. If a subscriber's buffer is
-// full the event is dropped for that subscriber. Publish never blocks.
+// Publish broadcasts an event to all subscribers whose filter matches the
+// event type. If a subscriber's buffer is full the event is dropped for that
+// subscriber. Publish never blocks.
 func (b *EventBus) Publish(ev Event) {
 	if b == nil {
 		return
@@ -105,6 +111,11 @@ func (b *EventBus) Publish(ev Event) {
 	}
 	b.mu.Lock()
 	for sub := range b.subscribers {
+		if sub.filter != nil {
+			if _, ok := sub.filter[ev.Type]; !ok {
+				continue
+			}
+		}
 		select {
 		case sub.ch <- ev:
 		default:

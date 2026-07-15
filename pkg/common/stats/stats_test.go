@@ -355,3 +355,91 @@ func TestEventBus_Close(t *testing.T) {
 		t.Errorf("SubscriberCount after Close = %d, want 0", bus.SubscriberCount())
 	}
 }
+
+func TestEventBus_SubscribeWithFilter(t *testing.T) {
+	bus := NewEventBus()
+	ctx, cancel := withTimeout()
+	defer cancel()
+
+	ch := bus.Subscribe(ctx, EventConnect)
+
+	bus.Publish(Event{Type: EventConnect, ConnectionID: "c1"})
+	bus.Publish(Event{Type: EventDisconnect, ConnectionID: "c1"})
+	bus.Publish(Event{Type: EventDialFailed, Target: "x:443"})
+
+	ev := <-ch
+	if ev.Type != EventConnect {
+		t.Errorf("event type = %s, want %s", ev.Type, EventConnect)
+	}
+
+	select {
+	case ev := <-ch:
+		t.Errorf("received unexpected filtered event: %s", ev.Type)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestEventBus_SubscribeMultipleTopics(t *testing.T) {
+	bus := NewEventBus()
+	ctx, cancel := withTimeout()
+	defer cancel()
+
+	ch := bus.Subscribe(ctx, EventConnect, EventDisconnect)
+
+	bus.Publish(Event{Type: EventConnect, ConnectionID: "c1"})
+	bus.Publish(Event{Type: EventDisconnect, ConnectionID: "c1"})
+	bus.Publish(Event{Type: EventShutdown})
+
+	ev1 := <-ch
+	if ev1.Type != EventConnect {
+		t.Errorf("first event type = %s, want %s", ev1.Type, EventConnect)
+	}
+	ev2 := <-ch
+	if ev2.Type != EventDisconnect {
+		t.Errorf("second event type = %s, want %s", ev2.Type, EventDisconnect)
+	}
+
+	select {
+	case ev := <-ch:
+		t.Errorf("received unexpected filtered event: %s", ev.Type)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestEventBus_SubscribeNoMatch(t *testing.T) {
+	bus := NewEventBus()
+	ctx, cancel := withTimeout()
+	defer cancel()
+
+	ch := bus.Subscribe(ctx, EventDialFailed)
+
+	bus.Publish(Event{Type: EventConnect})
+	bus.Publish(Event{Type: EventDisconnect})
+	bus.Publish(Event{Type: EventShutdown})
+
+	select {
+	case ev := <-ch:
+		t.Errorf("received unexpected event: %s", ev.Type)
+	case <-time.After(50 * time.Millisecond):
+	}
+}
+
+func TestEventBus_SubscribeAllWhenNoTypes(t *testing.T) {
+	bus := NewEventBus()
+	ctx, cancel := withTimeout()
+	defer cancel()
+
+	ch := bus.Subscribe(ctx)
+
+	bus.Publish(Event{Type: EventConnect})
+	bus.Publish(Event{Type: EventShutdown})
+
+	ev1 := <-ch
+	if ev1.Type != EventConnect {
+		t.Errorf("first event type = %s, want %s", ev1.Type, EventConnect)
+	}
+	ev2 := <-ch
+	if ev2.Type != EventShutdown {
+		t.Errorf("second event type = %s, want %s", ev2.Type, EventShutdown)
+	}
+}

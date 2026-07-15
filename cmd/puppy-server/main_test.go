@@ -730,7 +730,8 @@ func TestProviders(t *testing.T) {
 	}
 
 	t.Run("config provider", func(t *testing.T) {
-		cp := &configProvider{config: config}
+		cp := &configProvider{}
+		cp.Update(config)
 		result := cp.SanitizedConfig().(map[string]any)
 		if result["frontend"] != "office_proxy" {
 			t.Errorf("frontend = %v, want office_proxy", result["frontend"])
@@ -742,25 +743,22 @@ func TestProviders(t *testing.T) {
 	})
 
 	t.Run("frontend provider", func(t *testing.T) {
-		fp := &frontendProvider{
-			config:   config,
-			statuses: map[string]string{"office_proxy": "running"},
-		}
+		fp := &frontendProvider{}
+		fp.Update(config)
 		frontends := fp.Frontends()
 		if len(frontends) != 4 {
 			t.Fatalf("frontends count = %d, want 4", len(frontends))
 		}
-		fp.setStatus("office_proxy", "stopped")
-		frontends = fp.Frontends()
 		for _, fe := range frontends {
-			if fe.Name == "office_proxy" && fe.Status != "stopped" {
-				t.Errorf("status = %s, want stopped", fe.Status)
+			if fe.Name == "" || fe.Type == "" {
+				t.Errorf("frontend has empty name or type: %+v", fe)
 			}
 		}
 	})
 
 	t.Run("backend provider", func(t *testing.T) {
-		bp := &backendProvider{config: config}
+		bp := &backendProvider{}
+		bp.Update(config)
 		backends := bp.Backends()
 		if len(backends) != 3 {
 			t.Fatalf("backends count = %d, want 3", len(backends))
@@ -771,6 +769,25 @@ func TestProviders(t *testing.T) {
 					t.Errorf("direct_out capabilities = %d, want 2", len(be.Capabilities))
 				}
 			}
+		}
+	})
+
+	t.Run("provider update", func(t *testing.T) {
+		cp := &configProvider{}
+		cp.Update(config)
+		original := cp.SanitizedConfig().(map[string]any)
+
+		// Create a modified config with a different frontend selection.
+		modified := *config
+		modified.Frontend = "unused_socks"
+		cp.Update(&modified)
+
+		updated := cp.SanitizedConfig().(map[string]any)
+		if updated["frontend"] != "unused_socks" {
+			t.Errorf("after update: frontend = %v, want unused_socks", updated["frontend"])
+		}
+		if original["frontend"] != "office_proxy" {
+			t.Errorf("original config was mutated: frontend = %v", original["frontend"])
 		}
 	})
 }

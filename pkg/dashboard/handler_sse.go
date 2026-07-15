@@ -4,12 +4,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
+
+	"github.com/puppy/pkg/common/stats"
 )
 
 // handleEvents streams lifecycle events to the client via Server-Sent Events
 // (SSE). The connection stays open until the client disconnects or the server
 // shuts down.
+//
+// The optional "topics" query parameter filters events by type as a
+// comma-separated list, e.g. /events?topics=connect,disconnect. When omitted,
+// all event types are delivered.
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -26,9 +33,19 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
 
+	var topics []stats.EventType
+	if topicParam := r.URL.Query().Get("topics"); topicParam != "" {
+		for _, t := range strings.Split(topicParam, ",") {
+			t = strings.TrimSpace(t)
+			if t != "" {
+				topics = append(topics, stats.EventType(t))
+			}
+		}
+	}
+
 	// Subscribe to the event bus with the request context so the subscription
 	// is automatically cleaned up when the client disconnects.
-	ch := s.config.Bus.Subscribe(r.Context())
+	ch := s.config.Bus.Subscribe(r.Context(), topics...)
 
 	// Send a heartbeat ping every 15 seconds to keep proxies from closing
 	// idle connections.

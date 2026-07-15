@@ -78,9 +78,8 @@ type BackendProvider interface {
 
 // FrontendInfo describes a configured frontend for API responses.
 type FrontendInfo struct {
-	Name   string `json:"name"`
-	Type   string `json:"type"`
-	Status string `json:"status"`
+	Name string `json:"name"`
+	Type string `json:"type"`
 }
 
 // BackendInfo describes a configured backend for API responses.

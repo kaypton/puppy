@@ -22,8 +22,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc("GET /api/v1/config", s.middleware(s.handleGetConfig))
 	s.mux.HandleFunc("POST /api/v1/config/reload", s.middleware(s.handleReloadConfig))
 	s.mux.HandleFunc("GET /api/v1/frontends", s.middleware(s.handleListFrontends))
-	s.mux.HandleFunc("POST /api/v1/frontends/{name}/stop", s.middleware(s.handleStopFrontend))
-	s.mux.HandleFunc("POST /api/v1/frontends/{name}/start", s.middleware(s.handleStartFrontend))
 	s.mux.HandleFunc("GET /api/v1/backends", s.middleware(s.handleListBackends))
 	s.mux.HandleFunc("GET /api/v1/events", s.middleware(s.handleEvents))
 }

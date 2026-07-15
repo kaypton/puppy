@@ -287,7 +287,7 @@ curl -k -X POST -H "Authorization: Bearer <token>" https://127.0.0.1:8443/api/v1
 
 #### GET /frontends
 
-返回所有已配置的 frontend 及其运行状态。
+返回所有已配置的 frontend。
 
 **响应 200 OK:**
 
@@ -295,8 +295,8 @@ curl -k -X POST -H "Authorization: Bearer <token>" https://127.0.0.1:8443/api/v1
 {
   "count": 2,
   "frontends": [
-    {"name": "local_http_proxy", "type": "httpproxy", "status": "running"},
-    {"name": "local_socks_proxy", "type": "socksproxy", "status": "stopped"}
+    {"name": "local_http_proxy", "type": "httpproxy"},
+    {"name": "local_socks_proxy", "type": "socksproxy"}
   ]
 }
 ```
@@ -305,49 +305,6 @@ curl -k -X POST -H "Authorization: Bearer <token>" https://127.0.0.1:8443/api/v1
 |------|------|------|
 | name | string | frontend 名称 |
 | type | string | frontend 类型 (httpproxy/socksproxy/tun) |
-| status | string | 运行状态 (running/stopped) |
-
----
-
-#### POST /frontends/{name}/stop
-
-停止指定的 frontend。返回 `202 Accepted`，结果通过 SSE 事件流推送（`frontend_stopped` 事件）。
-
-**路径参数:**
-
-| 参数 | 说明 |
-|------|------|
-| name | frontend 名称 |
-
-**响应 202 Accepted:**
-
-```json
-{
-  "job_id": "stop-local_http_proxy",
-  "message": "stop request submitted for frontend local_http_proxy"
-}
-```
-
----
-
-#### POST /frontends/{name}/start
-
-启动指定的 frontend。返回 `202 Accepted`，结果通过 SSE 事件流推送（`frontend_started` 事件）。
-
-**路径参数:**
-
-| 参数 | 说明 |
-|------|------|
-| name | frontend 名称 |
-
-**响应 202 Accepted:**
-
-```json
-{
-  "job_id": "start-local_http_proxy",
-  "message": "start request submitted for frontend local_http_proxy"
-}
-```
 
 ---
 
@@ -389,6 +346,12 @@ curl -k -X POST -H "Authorization: Bearer <token>" https://127.0.0.1:8443/api/v1
 
 通过 Server-Sent Events (SSE) 推送实时生命周期事件。
 
+**查询参数:**
+
+| 参数 | 说明 |
+|------|------|
+| topics | （可选）按事件类型过滤，逗号分隔。如 `?topics=connect,disconnect`。未指定时接收所有事件 |
+
 **响应头:**
 
 ```
@@ -419,8 +382,6 @@ data: {"type":"config_reloaded","time":"2026-07-15T19:28:00+08:00"}
 | `dial_failed` | 后端拨号失败 | frontend, target, remote_addr, message |
 | `config_reloaded` | 配置热重载成功 | — |
 | `config_reload_failed` | 配置热重载失败 | message |
-| `frontend_stopped` | frontend 已停止 | frontend |
-| `frontend_started` | frontend 已启动 | frontend |
 | `shutdown` | 服务器正在关闭 | — |
 
 **心跳:** 服务器每 15 秒发送一个 SSE 注释 `: ping\n\n` 以保持连接活跃。
@@ -440,11 +401,17 @@ data: {"type":"config_reloaded","time":"2026-07-15T19:28:00+08:00"}
 **JavaScript 示例:**
 
 ```javascript
+// 接收所有事件
 const es = new EventSource("https://127.0.0.1:8443/api/v1/events", {
   withCredentials: true,
 });
 // 注意: EventSource 不支持自定义 header，需通过其他方式传递 token
 // 建议使用 fetch + ReadableStream 实现带认证的 SSE 客户端
+
+// 只接收连接事件
+const es = new EventSource("https://127.0.0.1:8443/api/v1/events?topics=connect,disconnect", {
+  withCredentials: true,
+});
 
 es.onmessage = (event) => {
   const data = JSON.parse(event.data);
@@ -455,7 +422,11 @@ es.onmessage = (event) => {
 **curl 示例:**
 
 ```bash
+# 接收所有事件
 curl -k -N -H "Authorization: Bearer <token>" https://127.0.0.1:8443/api/v1/events
+
+# 只接收连接和断开事件
+curl -k -N -H "Authorization: Bearer <token>" "https://127.0.0.1:8443/api/v1/events?topics=connect,disconnect"
 ```
 
 ---

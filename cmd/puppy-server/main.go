@@ -122,12 +122,13 @@ func runServer(ctx context.Context, configPath string) error {
 
 	// Set up the control channel and providers for the dashboard.
 	controlCh := make(chan dashboard.ControlRequest, 16)
-	feProvider := &frontendProvider{
-		config:   config,
-		statuses: map[string]string{config.Frontend: "running"},
-	}
-	beProvider := &backendProvider{config: config}
-	cfgProvider := &configProvider{config: config}
+
+	feProvider := &frontendProvider{}
+	feProvider.Update(config)
+	beProvider := &backendProvider{}
+	beProvider.Update(config)
+	cfgProvider := &configProvider{}
+	cfgProvider.Update(config)
 
 	dashCfg, err := config.Dashboard.ServerConfig(statsRegistry, connReg, bus, cfgProvider, feProvider, beProvider, controlCh, logger)
 	if err != nil {
@@ -143,12 +144,20 @@ func runServer(ctx context.Context, configPath string) error {
 	dashErrCh := make(chan error, 1)
 	go func() { dashErrCh <- dashServer.Run(dashCtx) }()
 
-	// Start the frontend in a goroutine.
-	frontendErrCh := make(chan error, 1)
-	frontendCtx, frontendCancel := context.WithCancel(ctx)
-	go func() { frontendErrCh <- frontend.Run(frontendCtx) }()
+	// Start the frontend in a goroutine via frontendManager.
+	feCtx, feCancel := context.WithCancel(ctx)
+	feErrCh := make(chan error, 1)
+	go func() { feErrCh <- frontend.Run(feCtx) }()
 
-	// Control loop: process control requests serially in the main goroutine.
+	feMgr := &frontendManager{
+		ctx:       ctx,
+		logger:    logger,
+		statsDeps: statsDeps,
+		cancel:    feCancel,
+		errCh:     feErrCh,
+	}
+
+	// Control loop: process control requests serially.
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -161,7 +170,7 @@ func runServer(ctx context.Context, configPath string) error {
 				if !ok {
 					return
 				}
-				handleControlRequest(ctx, req, configPath, logger, bus, feProvider, frontendCancel, dashCancel)
+				handleControlRequest(req, configPath, logger, bus, feMgr, cfgProvider, feProvider, beProvider, feCancel, dashCancel)
 			}
 		}
 	}()
@@ -170,20 +179,20 @@ func runServer(ctx context.Context, configPath string) error {
 	// other.
 	var firstErr error
 	select {
-	case err := <-frontendErrCh:
+	case err := <-feErrCh:
 		firstErr = err
 		dashCancel()
 	case err := <-dashErrCh:
 		firstErr = err
-		frontendCancel()
+		feCancel()
 	case <-ctx.Done():
-		frontendCancel()
+		feCancel()
 		dashCancel()
 	}
 
 	// Wait for both to finish.
-	if frontendErr := <-frontendErrCh; frontendErr != nil && firstErr == nil {
-		firstErr = frontendErr
+	if feErr := <-feErrCh; feErr != nil && firstErr == nil {
+		firstErr = feErr
 	}
 	if dashErr := <-dashErrCh; dashErr != nil && firstErr == nil {
 		firstErr = dashErr
@@ -193,16 +202,62 @@ func runServer(ctx context.Context, configPath string) error {
 	return firstErr
 }
 
+// frontendManager manages the lifecycle of the running frontend, supporting
+// hot reload by stopping the old frontend and starting a new one.
+type frontendManager struct {
+	mu        sync.Mutex
+	ctx       context.Context
+	logger    *slog.Logger
+	statsDeps stats.Deps
+	cancel    context.CancelFunc
+	errCh     chan error
+}
+
+// Reload stops the current frontend, builds a new one from newConfig, and
+// starts it. Active connections are dropped immediately when the old frontend
+// is cancelled. The stats registry, connection registry, and event bus are
+// preserved across reloads.
+func (m *frontendManager) Reload(newConfig *configuration) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Stop the old frontend and wait for it to fully exit.
+	if m.cancel != nil {
+		m.cancel()
+		<-m.errCh
+	}
+
+	// Update the frontend name in statsDeps in case it changed.
+	m.statsDeps.Name = newConfig.Frontend
+
+	// Build the new frontend.
+	newFrontend, err := buildFrontend(newConfig, m.logger, m.statsDeps)
+	if err != nil {
+		return err
+	}
+
+	// Start the new frontend.
+	ctx, cancel := context.WithCancel(m.ctx)
+	errCh := make(chan error, 1)
+	go func() { errCh <- newFrontend.Run(ctx) }()
+
+	m.cancel = cancel
+	m.errCh = errCh
+	return nil
+}
+
 // handleControlRequest processes a single control request from the dashboard.
-// Control operations are executed serially in this goroutine to avoid
+// Control operations are executed serially in the control goroutine to avoid
 // concurrent configuration mutations.
 func handleControlRequest(
-	ctx context.Context,
 	req dashboard.ControlRequest,
 	configPath string,
 	logger *slog.Logger,
 	bus *stats.EventBus,
+	feMgr *frontendManager,
+	cfgProvider *configProvider,
 	feProvider *frontendProvider,
+	beProvider *backendProvider,
 	frontendCancel context.CancelFunc,
 	dashCancel context.CancelFunc,
 ) {
@@ -211,11 +266,12 @@ func handleControlRequest(
 		logger.Info("dashboard: shutdown requested")
 		bus.Publish(stats.Event{Type: stats.EventShutdown})
 		frontendCancel()
+		dashCancel()
 		if req.Reply != nil {
 			req.Reply <- dashboard.ControlResponse{Success: true, Message: "shutdown initiated"}
 		}
 	case dashboard.ControlReloadConfig:
-		_, err := loadConfiguration(configPath)
+		newConfig, err := loadConfiguration(configPath)
 		if err != nil {
 			logger.Error("dashboard: config reload failed", "err", err)
 			bus.Publish(stats.Event{Type: stats.EventConfigReloadFailed, Message: err.Error()})
@@ -224,34 +280,21 @@ func handleControlRequest(
 			}
 			return
 		}
+		if err := feMgr.Reload(newConfig); err != nil {
+			logger.Error("dashboard: frontend rebuild failed", "err", err)
+			bus.Publish(stats.Event{Type: stats.EventConfigReloadFailed, Message: err.Error()})
+			if req.Reply != nil {
+				req.Reply <- dashboard.ControlResponse{Success: false, Message: err.Error()}
+			}
+			return
+		}
+		cfgProvider.Update(newConfig)
+		feProvider.Update(newConfig)
+		beProvider.Update(newConfig)
 		logger.Info("dashboard: config reloaded successfully")
 		bus.Publish(stats.Event{Type: stats.EventConfigReloaded})
 		if req.Reply != nil {
 			req.Reply <- dashboard.ControlResponse{Success: true, Message: "config reloaded"}
-		}
-	case dashboard.ControlStopFrontend:
-		if req.Frontend == "" {
-			if req.Reply != nil {
-				req.Reply <- dashboard.ControlResponse{Success: false, Message: "frontend name is required"}
-			}
-			return
-		}
-		feProvider.setStatus(req.Frontend, "stopped")
-		bus.Publish(stats.Event{Type: stats.EventFrontendStopped, Frontend: req.Frontend})
-		if req.Reply != nil {
-			req.Reply <- dashboard.ControlResponse{Success: true, Message: "frontend " + req.Frontend + " stopped"}
-		}
-	case dashboard.ControlStartFrontend:
-		if req.Frontend == "" {
-			if req.Reply != nil {
-				req.Reply <- dashboard.ControlResponse{Success: false, Message: "frontend name is required"}
-			}
-			return
-		}
-		feProvider.setStatus(req.Frontend, "running")
-		bus.Publish(stats.Event{Type: stats.EventFrontendStarted, Frontend: req.Frontend})
-		if req.Reply != nil {
-			req.Reply <- dashboard.ControlResponse{Success: true, Message: "frontend " + req.Frontend + " started"}
 		}
 	default:
 		if req.Reply != nil {

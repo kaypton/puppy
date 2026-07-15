@@ -34,8 +34,8 @@ func testServer(t *testing.T, token string) (*Server, *stats.StatsRegistry, *sta
 		ConfigProvider: &testConfigProvider{},
 		FrontendProvider: &testFrontendProvider{
 			frontends: []FrontendInfo{
-				{Name: "fe1", Type: "httpproxy", Status: "running"},
-				{Name: "fe2", Type: "socksproxy", Status: "stopped"},
+				{Name: "fe1", Type: "httpproxy"},
+				{Name: "fe2", Type: "socksproxy"},
 			},
 		},
 		BackendProvider: &testBackendProvider{
