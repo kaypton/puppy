@@ -75,6 +75,13 @@ func newNetworkStack(device Device, mtu uint32) (*networkStack, error) {
 	if err := s.SetPromiscuousMode(nicID, true); err != nil {
 		return nil, fmt.Errorf("tunproxy: set promiscuous mode: %s", err)
 	}
+	// Forwarded endpoints must reply with the intercepted destination as their
+	// source address. Those addresses are intentionally not assigned to the
+	// NIC, so outgoing address selection requires spoofing in addition to
+	// promiscuous receive mode.
+	if err := s.SetSpoofing(nicID, true); err != nil {
+		return nil, fmt.Errorf("tunproxy: set spoofing: %s", err)
+	}
 	s.SetRouteTable([]tcpip.Route{
 		{
 			Destination: header.IPv4EmptySubnet,
