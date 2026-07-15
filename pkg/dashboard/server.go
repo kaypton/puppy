@@ -96,6 +96,26 @@ type CapabilityInfo struct {
 	Protocol string `json:"protocol"`
 }
 
+// Validate checks the runtime configuration fields.
+func (c ServerConfiguration) Validate() error {
+	if c.ListenAddress == "" {
+		return errors.New("dashboard: listen address is required")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("dashboard: TLS certificate and key files must both be set or both be empty")
+	}
+	if c.Stats == nil {
+		return errors.New("dashboard: stats registry is required")
+	}
+	if c.ConnReg == nil {
+		return errors.New("dashboard: connection registry is required")
+	}
+	if c.Bus == nil {
+		return errors.New("dashboard: event bus is required")
+	}
+	return nil
+}
+
 // Server is the dashboard HTTP API server.
 type Server struct {
 	config ServerConfiguration
@@ -103,24 +123,10 @@ type Server struct {
 	mux    *http.ServeMux
 }
 
-// NewServer validates the configuration and returns a ready-to-run dashboard
-// server.
+// NewServer applies defaults and returns a ready-to-run dashboard server.
+// Configuration validation must be performed via Validate() (typically through
+// ServerConfig()) before calling NewServer.
 func NewServer(config ServerConfiguration) (*Server, error) {
-	if config.ListenAddress == "" {
-		return nil, errors.New("dashboard: listen address is required")
-	}
-	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
-		return nil, errors.New("dashboard: TLS certificate and key files must both be set or both be empty")
-	}
-	if config.Stats == nil {
-		return nil, errors.New("dashboard: stats registry is required")
-	}
-	if config.ConnReg == nil {
-		return nil, errors.New("dashboard: connection registry is required")
-	}
-	if config.Bus == nil {
-		return nil, errors.New("dashboard: event bus is required")
-	}
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()

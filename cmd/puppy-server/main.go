@@ -31,7 +31,7 @@ type rawConfiguration struct {
 	Frontends map[string]toml.Primitive `toml:"frontends"`
 	Backends  map[string]toml.Primitive `toml:"backends"`
 	Shims     map[string]toml.Primitive `toml:"shims"`
-	Dashboard *DashboardConfiguration   `toml:"dashboard"`
+	Dashboard *dashboard.Configuration  `toml:"dashboard"`
 }
 
 type configuration struct {
@@ -39,35 +39,7 @@ type configuration struct {
 	Frontends map[string]frontendGroup
 	Backends  map[string]backendGroup
 	Shims     map[string]shim.Configuration
-	Dashboard *DashboardConfiguration
-}
-
-// DashboardConfiguration is the TOML configuration for the dashboard HTTP API
-// server.
-type DashboardConfiguration struct {
-	Enabled       bool   `toml:"enabled"`
-	ListenAddress string `toml:"listen_address"`
-	ListenPort    uint16 `toml:"listen_port"`
-	TLSCertFile   string `toml:"tls_cert_file"`
-	TLSKeyFile    string `toml:"tls_key_file"`
-	Token         string `toml:"token"`
-}
-
-// Validate checks the dashboard configuration fields.
-func (c *DashboardConfiguration) Validate() error {
-	if !c.Enabled {
-		return nil
-	}
-	if c.ListenAddress == "" {
-		return errors.New("dashboard: listen_address is required when enabled")
-	}
-	if c.ListenPort == 0 {
-		return errors.New("dashboard: listen_port is required when enabled")
-	}
-	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
-		return errors.New("dashboard: tls_cert_file and tls_key_file must both be set or both be empty")
-	}
-	return nil
+	Dashboard *dashboard.Configuration
 }
 
 type componentType struct {
@@ -157,21 +129,11 @@ func runServer(ctx context.Context, configPath string) error {
 	beProvider := &backendProvider{config: config}
 	cfgProvider := &configProvider{config: config}
 
-	dashServer, err := dashboard.NewServer(dashboard.ServerConfiguration{
-		ListenAddress:    config.Dashboard.ListenAddress,
-		ListenPort:       config.Dashboard.ListenPort,
-		TLSCertFile:      config.Dashboard.TLSCertFile,
-		TLSKeyFile:       config.Dashboard.TLSKeyFile,
-		Token:            config.Dashboard.Token,
-		Stats:            statsRegistry,
-		ConnReg:          connReg,
-		Bus:              bus,
-		ConfigProvider:   cfgProvider,
-		FrontendProvider: feProvider,
-		BackendProvider:  beProvider,
-		ControlCh:        controlCh,
-		Logger:           logger,
-	})
+	dashCfg, err := config.Dashboard.ServerConfig(statsRegistry, connReg, bus, cfgProvider, feProvider, beProvider, controlCh, logger)
+	if err != nil {
+		return fmt.Errorf("build dashboard: %w", err)
+	}
+	dashServer, err := dashboard.NewServer(dashCfg)
 	if err != nil {
 		return fmt.Errorf("build dashboard: %w", err)
 	}
@@ -537,7 +499,11 @@ func buildFrontend(config *configuration, logger *slog.Logger, statsDeps stats.D
 			return nil, fmt.Errorf("build backend %q: %w", frontendConfig.Backend, err)
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
-		frontend, err := frontendhttpproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger, statsDeps))
+		rc, err := frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger, statsDeps)
+		if err != nil {
+			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
+		}
+		frontend, err := frontendhttpproxy.NewServer(rc)
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}
@@ -552,7 +518,11 @@ func buildFrontend(config *configuration, logger *slog.Logger, statsDeps stats.D
 			return nil, fmt.Errorf("build backend %q: %w", frontendConfig.Backend, err)
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
-		frontend, err := frontendsocksproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger, statsDeps))
+		rc, err := frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger, statsDeps)
+		if err != nil {
+			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
+		}
+		frontend, err := frontendsocksproxy.NewServer(rc)
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}
@@ -580,7 +550,11 @@ func buildFrontend(config *configuration, logger *slog.Logger, statsDeps stats.D
 			}
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
-		frontend, err := frontendtunproxy.NewServer(frontendConfig.ServerConfig(backends, fallback, shimConfig.BufferSize, logger))
+		rc, err := frontendConfig.ServerConfig(backends, fallback, shimConfig.BufferSize, logger)
+		if err != nil {
+			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
+		}
+		frontend, err := frontendtunproxy.NewServer(rc)
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}
@@ -602,13 +576,21 @@ func buildBackend(group backendGroup, logger *slog.Logger) (common.Backend, erro
 		if !ok {
 			return nil, fmt.Errorf("configuration does not match type %q", group.Type)
 		}
-		return adapterhttpproxy.NewBackend(backendConfig.BackendConfig(logger))
+		rc, err := backendConfig.BackendConfig(logger)
+		if err != nil {
+			return nil, fmt.Errorf("configuration does not match type %q: %w", group.Type, err)
+		}
+		return adapterhttpproxy.NewBackend(rc)
 	case adaptersocksproxy.Type:
 		backendConfig, ok := group.Configuration.(adaptersocksproxy.Configuration)
 		if !ok {
 			return nil, fmt.Errorf("configuration does not match type %q", group.Type)
 		}
-		return adaptersocksproxy.NewBackend(backendConfig.BackendConfig(logger))
+		rc, err := backendConfig.BackendConfig(logger)
+		if err != nil {
+			return nil, fmt.Errorf("configuration does not match type %q: %w", group.Type, err)
+		}
+		return adaptersocksproxy.NewBackend(rc)
 	default:
 		return nil, fmt.Errorf("unsupported type %q", group.Type)
 	}

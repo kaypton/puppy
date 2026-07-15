@@ -15,7 +15,7 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/stack"
 )
 
-func TestNewServer_Validation(t *testing.T) {
+func TestServerConfiguration_Validate(t *testing.T) {
 	backend := direct.NewBackend()
 	fallback := direct.NewBackend()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -34,7 +34,7 @@ func TestNewServer_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewServer(tc.cfg)
+			err := tc.cfg.Validate()
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)

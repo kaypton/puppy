@@ -131,8 +131,9 @@ func validateAddresses(ipv4Address, ipv6Address string) error {
 	return nil
 }
 
-// ServerConfig adds runtime dependencies to the frontend's file configuration.
-func (c Configuration) ServerConfig(backends []common.Backend, fallback common.Backend, shimBufferSize int, logger *slog.Logger) ServerConfiguration {
+// ServerConfig adds runtime dependencies to the frontend's file configuration
+// and validates the resulting runtime configuration.
+func (c Configuration) ServerConfig(backends []common.Backend, fallback common.Backend, shimBufferSize int, logger *slog.Logger) (ServerConfiguration, error) {
 	mtu := uint32(c.MTU)
 	udpIdle := time.Duration(c.UDPIdleTimeout) * time.Second
 	if c.UDPIdleTimeout <= 0 {
@@ -150,7 +151,7 @@ func (c Configuration) ServerConfig(backends []common.Backend, fallback common.B
 	if detectMaxBytes == 0 {
 		detectMaxBytes = defaultProtocolDetectMaxBytes
 	}
-	return ServerConfiguration{
+	sc := ServerConfiguration{
 		DeviceName:             c.DeviceName,
 		IPv4Address:            c.IPv4Address,
 		IPv6Address:            c.IPv6Address,
@@ -165,6 +166,10 @@ func (c Configuration) ServerConfig(backends []common.Backend, fallback common.B
 		ShimBufferSize:         shimBufferSize,
 		Logger:                 logger,
 	}
+	if err := sc.Validate(); err != nil {
+		return ServerConfiguration{}, err
+	}
+	return sc, nil
 }
 
 // BackendReferences returns the configured candidates in routing order.

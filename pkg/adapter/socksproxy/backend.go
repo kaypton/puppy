@@ -53,6 +53,25 @@ type BackendConfiguration struct {
 	Logger *slog.Logger
 }
 
+// Validate checks the runtime configuration fields.
+func (c BackendConfiguration) Validate() error {
+	if c.ProxyAddress == "" {
+		return errors.New("socksproxy: proxy address is required")
+	}
+	if (c.Username == "") != (c.Password == "") {
+		return errors.New("socksproxy: username and password must both be set or both be empty")
+	}
+	if !c.TLS {
+		if c.TLSCAFile != "" || c.TLSServerName != "" || c.TLSInsecureSkipVerify {
+			return errors.New("socksproxy: tls_ca_file, tls_server_name, and tls_insecure_skip_verify require tls = true")
+		}
+	}
+	if c.TLSInsecureSkipVerify && c.TLSCAFile != "" {
+		return errors.New("socksproxy: tls_insecure_skip_verify and tls_ca_file are mutually exclusive")
+	}
+	return nil
+}
+
 // Backend chains connections through an upstream SOCKS5 proxy via CONNECT.
 type Backend struct {
 	config    BackendConfiguration
@@ -60,22 +79,10 @@ type Backend struct {
 	tlsConfig *tls.Config
 }
 
-// NewBackend validates the configuration and returns a chaining backend.
+// NewBackend applies defaults and returns a chaining backend. Configuration
+// validation must be performed via Validate() (typically through BackendConfig())
+// before calling NewBackend.
 func NewBackend(config BackendConfiguration) (*Backend, error) {
-	if config.ProxyAddress == "" {
-		return nil, errors.New("socksproxy: proxy address is required")
-	}
-	if (config.Username == "") != (config.Password == "") {
-		return nil, errors.New("socksproxy: username and password must both be set or both be empty")
-	}
-	if !config.TLS {
-		if config.TLSCAFile != "" || config.TLSServerName != "" || config.TLSInsecureSkipVerify {
-			return nil, errors.New("socksproxy: tls_ca_file, tls_server_name, and tls_insecure_skip_verify require tls = true")
-		}
-	}
-	if config.TLSInsecureSkipVerify && config.TLSCAFile != "" {
-		return nil, errors.New("socksproxy: tls_insecure_skip_verify and tls_ca_file are mutually exclusive")
-	}
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()

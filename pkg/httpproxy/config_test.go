@@ -63,7 +63,10 @@ func TestConfigurationServerConfig(t *testing.T) {
 		Shim:             "tunnel",
 	}
 
-	serverConfig := config.ServerConfig(backend, 65536, logger, stats.Deps{Name: "test", Stats: stats.NewStatsRegistry(), ConnReg: stats.NewConnectionRegistry(), Bus: stats.NewEventBus()})
+	serverConfig, err := config.ServerConfig(backend, 65536, logger, stats.Deps{Name: "test", Stats: stats.NewStatsRegistry(), ConnReg: stats.NewConnectionRegistry(), Bus: stats.NewEventBus()})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
 	if serverConfig.ListenAddress != config.ListenAddress || serverConfig.ListenPort != config.ListenPort {
 		t.Fatalf("listen configuration = %s:%d", serverConfig.ListenAddress, serverConfig.ListenPort)
 	}
@@ -85,8 +88,16 @@ func TestConfigurationServerConfig(t *testing.T) {
 }
 
 func TestConfigurationServerConfig_DefaultsCamouflageMethod(t *testing.T) {
-	config := Configuration{}
-	serverConfig := config.ServerConfig(direct.NewBackend(), 0, nil, stats.Deps{})
+	config := Configuration{
+		ListenAddress: "127.0.0.1",
+		ListenPort:    8080,
+		Backend:       "out",
+		Shim:          "tunnel",
+	}
+	serverConfig, err := config.ServerConfig(direct.NewBackend(), 0, nil, stats.Deps{})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
 	if serverConfig.CamouflageMethod != Return404 {
 		t.Fatalf("CamouflageMethod = %q, want %q", serverConfig.CamouflageMethod, Return404)
 	}

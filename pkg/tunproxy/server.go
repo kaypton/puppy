@@ -28,6 +28,33 @@ type ServerConfiguration struct {
 	Logger                 *slog.Logger
 }
 
+// Validate checks the runtime configuration fields.
+func (c ServerConfiguration) Validate() error {
+	if err := validateAddresses(c.IPv4Address, c.IPv6Address); err != nil {
+		return fmt.Errorf("tunproxy: %w", err)
+	}
+	if len(c.Backends) == 0 {
+		return errors.New("tunproxy: at least one backend is required")
+	}
+	if _, err := parseDNSServer(c.DNSServer); err != nil {
+		return fmt.Errorf("tunproxy: %w", err)
+	}
+	for _, backend := range c.Backends {
+		if backend == nil {
+			return errors.New("tunproxy: backends must not contain nil")
+		}
+	}
+	if c.Fallback == nil {
+		return errors.New("tunproxy: fallback is required")
+	}
+	for _, network := range []string{"tcp", "udp"} {
+		if !common.SupportsAnyProtocol(c.Fallback.Capabilities(), network) {
+			return fmt.Errorf("tunproxy: fallback must support %s with any application protocol", network)
+		}
+	}
+	return nil
+}
+
 // Server is a TUN-mode proxy frontend. It opens a virtual TUN device, runs a
 // userspace network stack, and forwards accepted TCP/UDP sessions to a
 // common.Backend.
@@ -37,30 +64,13 @@ type Server struct {
 	dns    *common.Target
 }
 
-// NewServer validates the configuration and returns a ready-to-run server.
+// NewServer applies defaults and returns a ready-to-run server. Configuration
+// validation must be performed via Validate() (typically through ServerConfig())
+// before calling NewServer.
 func NewServer(config ServerConfiguration) (*Server, error) {
-	if err := validateAddresses(config.IPv4Address, config.IPv6Address); err != nil {
-		return nil, fmt.Errorf("tunproxy: %w", err)
-	}
-	if len(config.Backends) == 0 {
-		return nil, errors.New("tunproxy: at least one backend is required")
-	}
 	dns, err := parseDNSServer(config.DNSServer)
 	if err != nil {
 		return nil, fmt.Errorf("tunproxy: %w", err)
-	}
-	for _, backend := range config.Backends {
-		if backend == nil {
-			return nil, errors.New("tunproxy: backends must not contain nil")
-		}
-	}
-	if config.Fallback == nil {
-		return nil, errors.New("tunproxy: fallback is required")
-	}
-	for _, network := range []string{"tcp", "udp"} {
-		if !common.SupportsAnyProtocol(config.Fallback.Capabilities(), network) {
-			return nil, fmt.Errorf("tunproxy: fallback must support %s with any application protocol", network)
-		}
 	}
 	if config.UDPIdleTimeout <= 0 {
 		config.UDPIdleTimeout = defaultUDPIdle

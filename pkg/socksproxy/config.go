@@ -54,9 +54,10 @@ func (c Configuration) Validate() error {
 	return nil
 }
 
-// ServerConfig adds runtime dependencies to the frontend's file configuration.
-func (c Configuration) ServerConfig(backend common.Backend, shimBufferSize int, logger *slog.Logger, statsDeps stats.Deps) ServerConfiguration {
-	return ServerConfiguration{
+// ServerConfig adds runtime dependencies to the frontend's file configuration
+// and validates the resulting runtime configuration.
+func (c Configuration) ServerConfig(backend common.Backend, shimBufferSize int, logger *slog.Logger, statsDeps stats.Deps) (ServerConfiguration, error) {
+	sc := ServerConfiguration{
 		ListenAddress:  c.ListenAddress,
 		ListenPort:     c.ListenPort,
 		TLSCertFile:    c.TLSCertFile,
@@ -71,4 +72,8 @@ func (c Configuration) ServerConfig(backend common.Backend, shimBufferSize int, 
 		ConnReg:        statsDeps.ConnReg,
 		Bus:            statsDeps.Bus,
 	}
+	if err := sc.Validate(); err != nil {
+		return ServerConfiguration{}, err
+	}
+	return sc, nil
 }

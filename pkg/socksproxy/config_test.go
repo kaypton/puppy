@@ -60,7 +60,10 @@ func TestConfigurationServerConfig(t *testing.T) {
 		Shim:          "tunnel",
 	}
 
-	serverConfig := config.ServerConfig(backend, 65536, logger, stats.Deps{Name: "test", Stats: stats.NewStatsRegistry(), ConnReg: stats.NewConnectionRegistry(), Bus: stats.NewEventBus()})
+	serverConfig, err := config.ServerConfig(backend, 65536, logger, stats.Deps{Name: "test", Stats: stats.NewStatsRegistry(), ConnReg: stats.NewConnectionRegistry(), Bus: stats.NewEventBus()})
+	if err != nil {
+		t.Fatalf("ServerConfig: %v", err)
+	}
 	if serverConfig.ListenAddress != config.ListenAddress || serverConfig.ListenPort != config.ListenPort {
 		t.Fatalf("listen configuration = %s:%d", serverConfig.ListenAddress, serverConfig.ListenPort)
 	}

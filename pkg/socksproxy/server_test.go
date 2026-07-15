@@ -252,7 +252,7 @@ func socksHandshake(conn net.Conn, username, password, targetHost string, target
 	return nil
 }
 
-func TestNewServer_Validation(t *testing.T) {
+func TestServerConfiguration_Validate(t *testing.T) {
 	validBackend := direct.NewBackend()
 	cases := []struct {
 		name    string
@@ -272,7 +272,7 @@ func TestNewServer_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewServer(tc.cfg)
+			err := tc.cfg.Validate()
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)

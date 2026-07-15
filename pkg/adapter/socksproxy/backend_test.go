@@ -233,7 +233,7 @@ func parseTarget(addr string) common.Target {
 	return common.Target{Network: "tcp", Host: host, Port: port}
 }
 
-func TestNewBackend_Validation(t *testing.T) {
+func TestBackendConfiguration_Validate(t *testing.T) {
 	cases := []struct {
 		name    string
 		cfg     BackendConfiguration
@@ -252,7 +252,7 @@ func TestNewBackend_Validation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewBackend(tc.cfg)
+			err := tc.cfg.Validate()
 			if tc.wantErr == "" {
 				if err != nil {
 					t.Fatalf("unexpected error: %v", err)

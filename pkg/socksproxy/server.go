@@ -54,6 +54,29 @@ type ServerConfiguration struct {
 	Bus *stats.EventBus
 }
 
+// Validate checks the runtime configuration fields.
+func (c ServerConfiguration) Validate() error {
+	if c.ListenAddress == "" {
+		return errors.New("socksproxy: listen address is required")
+	}
+	if c.ListenPort == 0 {
+		return errors.New("socksproxy: listen port is required")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("socksproxy: TLS certificate and key files must both be set or both be empty")
+	}
+	if c.Backend == nil {
+		return errors.New("socksproxy: backend is required")
+	}
+	if !common.Supports(c.Backend.Capabilities(), common.Target{Network: "tcp", Protocol: common.ProtocolUnknown}) {
+		return errors.New("socksproxy: backend must support tcp with unknown application protocol")
+	}
+	if (c.Username == "") != (c.Password == "") {
+		return errors.New("socksproxy: username and password must both be set or both be empty")
+	}
+	return nil
+}
+
 // Server is a SOCKS5 proxy that fronts a ShimServer per connection.
 type Server struct {
 	config    ServerConfiguration
@@ -63,28 +86,12 @@ type Server struct {
 	tlsConfig *tls.Config
 }
 
-// NewServer validates the configuration and returns a ready-to-run proxy.
+// NewServer applies defaults and returns a ready-to-run proxy. Configuration
+// validation must be performed via Validate() (typically through ServerConfig())
+// before calling NewServer.
 func NewServer(config ServerConfiguration) (*Server, error) {
-	if config.ListenAddress == "" {
-		return nil, errors.New("socksproxy: listen address is required")
-	}
-	if config.ListenPort == 0 {
-		return nil, errors.New("socksproxy: listen port is required")
-	}
-	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
-		return nil, errors.New("socksproxy: TLS certificate and key files must both be set or both be empty")
-	}
-	if config.Backend == nil {
-		return nil, errors.New("socksproxy: backend is required")
-	}
-	if !common.Supports(config.Backend.Capabilities(), common.Target{Network: "tcp", Protocol: common.ProtocolUnknown}) {
-		return nil, errors.New("socksproxy: backend must support tcp with unknown application protocol")
-	}
 	if config.EgressDialer == nil {
 		config.EgressDialer = common.SystemDialer()
-	}
-	if (config.Username == "") != (config.Password == "") {
-		return nil, errors.New("socksproxy: username and password must both be set or both be empty")
 	}
 	logger := config.Logger
 	if logger == nil {
@@ -212,11 +219,20 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		wrappedFrontend = counting.NewConn(frontend, connInfo, s.config.Stats)
 	}
 
-	shimServer, err := shim.NewShimServer(shim.ShimServerConfiguration{
+	shimCfg := shim.ShimServerConfiguration{
 		Frontend:   wrappedFrontend,
 		Backend:    upstream,
 		BufferSize: s.config.ShimBufferSize,
-	})
+	}
+	if err := shimCfg.Validate(); err != nil {
+		s.logger.Error("shim configuration invalid", "target", target, "err", err)
+		if connInfo != nil {
+			s.config.ConnReg.Remove(connInfo.ID)
+			s.config.Stats.DecActive()
+		}
+		return
+	}
+	shimServer, err := shim.NewShimServer(shimCfg)
 	if err != nil {
 		s.logger.Error("shim construction failed", "target", target, "err", err)
 		if connInfo != nil {

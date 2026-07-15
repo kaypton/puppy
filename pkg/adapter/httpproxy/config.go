@@ -62,9 +62,10 @@ func (c Configuration) Validate() error {
 	return nil
 }
 
-// BackendConfig adds runtime dependencies to the backend's file configuration.
-func (c Configuration) BackendConfig(logger *slog.Logger) BackendConfiguration {
-	return BackendConfiguration{
+// BackendConfig adds runtime dependencies to the backend's file configuration
+// and validates the resulting runtime configuration.
+func (c Configuration) BackendConfig(logger *slog.Logger) (BackendConfiguration, error) {
+	bc := BackendConfiguration{
 		ProxyAddress:          c.ProxyAddress,
 		Username:              c.Username,
 		Password:              c.Password,
@@ -74,4 +75,8 @@ func (c Configuration) BackendConfig(logger *slog.Logger) BackendConfiguration {
 		TLSInsecureSkipVerify: c.TLSInsecureSkipVerify,
 		Logger:                logger,
 	}
+	if err := bc.Validate(); err != nil {
+		return BackendConfiguration{}, err
+	}
+	return bc, nil
 }

@@ -4,6 +4,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/puppy/pkg/adapter/direct"
+	"github.com/puppy/pkg/common"
 )
 
 func TestConfiguration_Validate(t *testing.T) {
@@ -206,9 +209,14 @@ func TestConfiguration_Validate(t *testing.T) {
 
 func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 	autoRoute := false
+	backends := []common.Backend{direct.NewBackend()}
+	fallback := common.Backend(direct.NewBackend())
 	t.Run("default udp idle and auto_route", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", Backend: "b", Shim: "s"}
-		sc := cfg.ServerConfig(nil, nil, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		if err != nil {
+			t.Fatalf("ServerConfig: %v", err)
+		}
 		if sc.UDPIdleTimeout != defaultUDPIdle {
 			t.Fatalf("UDPIdleTimeout = %v, want %v", sc.UDPIdleTimeout, defaultUDPIdle)
 		}
@@ -230,28 +238,40 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 		if got := cfg.BackendReferences(); len(got) != 2 || got[0] != "first" || got[1] != "second" {
 			t.Fatalf("BackendReferences = %v", got)
 		}
-		sc := cfg.ServerConfig(nil, nil, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		if err != nil {
+			t.Fatalf("ServerConfig: %v", err)
+		}
 		if sc.ProtocolDetectTimeout != 3*time.Second || sc.ProtocolDetectMaxBytes != 4096 {
 			t.Fatalf("protocol detection = (%v, %d)", sc.ProtocolDetectTimeout, sc.ProtocolDetectMaxBytes)
 		}
 	})
 	t.Run("explicit auto_route false", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", AutoRoute: &autoRoute, Backend: "b", Shim: "s"}
-		sc := cfg.ServerConfig(nil, nil, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		if err != nil {
+			t.Fatalf("ServerConfig: %v", err)
+		}
 		if sc.AutoRoute {
 			t.Fatal("AutoRoute should be false when explicitly set")
 		}
 	})
 	t.Run("explicit udp idle", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", UDPIdleTimeout: 10, Backend: "b", Shim: "s"}
-		sc := cfg.ServerConfig(nil, nil, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		if err != nil {
+			t.Fatalf("ServerConfig: %v", err)
+		}
 		if sc.UDPIdleTimeout != 10*time.Second {
 			t.Fatalf("UDPIdleTimeout = %v, want 10s", sc.UDPIdleTimeout)
 		}
 	})
 	t.Run("dns server", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", DNSServer: "1.1.1.1:53", Backend: "b", Shim: "s"}
-		sc := cfg.ServerConfig(nil, nil, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		if err != nil {
+			t.Fatalf("ServerConfig: %v", err)
+		}
 		if sc.DNSServer != cfg.DNSServer {
 			t.Fatalf("DNSServer = %q, want %q", sc.DNSServer, cfg.DNSServer)
 		}

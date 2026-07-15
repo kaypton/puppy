@@ -111,11 +111,16 @@ func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
 		_ = upstream.Close()
 	}()
 
-	s, err := shim.NewShimServer(shim.ShimServerConfiguration{
+	shimCfg := shim.ShimServerConfiguration{
 		Frontend:   frontendConn,
 		Backend:    upstream,
 		BufferSize: d.shimBuf,
-	})
+	}
+	if err := shimCfg.Validate(); err != nil {
+		d.logger.Error("tunproxy: shim configuration invalid", "target", target.Address(), "err", err)
+		return
+	}
+	s, err := shim.NewShimServer(shimCfg)
 	if err != nil {
 		d.logger.Error("tunproxy: shim construction failed", "target", target.Address(), "err", err)
 		return
@@ -235,11 +240,16 @@ func (d *dispatcher) serveInterceptedDNSStream(frontend io.ReadWriteCloser) {
 	}
 	defer upstream.Close()
 
-	s, err := shim.NewShimServer(shim.ShimServerConfiguration{
+	shimCfg := shim.ShimServerConfiguration{
 		Frontend:   frontend,
 		Backend:    upstream,
 		BufferSize: d.shimBuf,
-	})
+	}
+	if err := shimCfg.Validate(); err != nil {
+		d.logger.Error("tunproxy: systemd-resolved tcp dns shim configuration invalid", "target", target.Address(), "err", err)
+		return
+	}
+	s, err := shim.NewShimServer(shimCfg)
 	if err != nil {
 		d.logger.Error("tunproxy: systemd-resolved tcp dns shim construction failed", "target", target.Address(), "err", err)
 		return

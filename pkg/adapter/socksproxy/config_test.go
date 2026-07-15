@@ -55,7 +55,10 @@ func TestConfigurationBackendConfig(t *testing.T) {
 		TLSServerName:         "proxy.internal",
 		TLSInsecureSkipVerify: false,
 	}
-	backendConfig := config.BackendConfig(logger)
+	backendConfig, err := config.BackendConfig(logger)
+	if err != nil {
+		t.Fatalf("BackendConfig: %v", err)
+	}
 	if backendConfig.ProxyAddress != config.ProxyAddress || backendConfig.Username != config.Username || backendConfig.Password != config.Password {
 		t.Fatal("file configuration was not copied")
 	}

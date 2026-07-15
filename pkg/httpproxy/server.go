@@ -66,6 +66,34 @@ type ServerConfiguration struct {
 	Bus *stats.EventBus
 }
 
+// Validate checks the runtime configuration fields. CamouflageMethod must
+// already be normalized (ServerConfig does this); only non-Return404 values
+// are rejected.
+func (c ServerConfiguration) Validate() error {
+	if c.ListenAddress == "" {
+		return errors.New("httpproxy: listen address is required")
+	}
+	if c.ListenPort == 0 {
+		return errors.New("httpproxy: listen port is required")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("httpproxy: TLS certificate and key files must both be set or both be empty")
+	}
+	if c.Backend == nil {
+		return errors.New("httpproxy: backend is required")
+	}
+	if !common.Supports(c.Backend.Capabilities(), common.Target{Network: "tcp", Protocol: common.ProtocolUnknown}) {
+		return errors.New("httpproxy: backend must support tcp with unknown application protocol")
+	}
+	if (c.Username == "") != (c.Password == "") {
+		return errors.New("httpproxy: username and password must both be set or both be empty")
+	}
+	if method := normalizeCamouflageMethod(c.CamouflageMethod); method != Return404 {
+		return fmt.Errorf("httpproxy: unsupported camouflage method %q", c.CamouflageMethod)
+	}
+	return nil
+}
+
 // Server is an HTTP CONNECT proxy that fronts a ShimServer per connection.
 type Server struct {
 	config    ServerConfiguration
@@ -75,33 +103,14 @@ type Server struct {
 	tlsConfig *tls.Config
 }
 
-// NewServer validates the configuration and returns a ready-to-run proxy.
+// NewServer applies defaults and returns a ready-to-run proxy. Configuration
+// validation must be performed via Validate() (typically through ServerConfig())
+// before calling NewServer.
 func NewServer(config ServerConfiguration) (*Server, error) {
-	if config.ListenAddress == "" {
-		return nil, errors.New("httpproxy: listen address is required")
-	}
-	if config.ListenPort == 0 {
-		return nil, errors.New("httpproxy: listen port is required")
-	}
-	if (config.TLSCertFile == "") != (config.TLSKeyFile == "") {
-		return nil, errors.New("httpproxy: TLS certificate and key files must both be set or both be empty")
-	}
-	if config.Backend == nil {
-		return nil, errors.New("httpproxy: backend is required")
-	}
-	if !common.Supports(config.Backend.Capabilities(), common.Target{Network: "tcp", Protocol: common.ProtocolUnknown}) {
-		return nil, errors.New("httpproxy: backend must support tcp with unknown application protocol")
-	}
 	if config.EgressDialer == nil {
 		config.EgressDialer = common.SystemDialer()
 	}
-	if (config.Username == "") != (config.Password == "") {
-		return nil, errors.New("httpproxy: username and password must both be set or both be empty")
-	}
 	config.CamouflageMethod = normalizeCamouflageMethod(config.CamouflageMethod)
-	if config.CamouflageMethod != Return404 {
-		return nil, fmt.Errorf("httpproxy: unsupported camouflage method %q", config.CamouflageMethod)
-	}
 	logger := config.Logger
 	if logger == nil {
 		logger = slog.Default()
@@ -235,11 +244,20 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		wrappedFrontend = counting.NewConn(frontend, connInfo, s.config.Stats)
 	}
 
-	shimServer, err := shim.NewShimServer(shim.ShimServerConfiguration{
+	shimCfg := shim.ShimServerConfiguration{
 		Frontend:   wrappedFrontend,
 		Backend:    upstream,
 		BufferSize: s.config.ShimBufferSize,
-	})
+	}
+	if err := shimCfg.Validate(); err != nil {
+		s.logger.Error("shim configuration invalid", "target", target, "err", err)
+		if connInfo != nil {
+			s.config.ConnReg.Remove(connInfo.ID)
+			s.config.Stats.DecActive()
+		}
+		return
+	}
+	shimServer, err := shim.NewShimServer(shimCfg)
 	if err != nil {
 		s.logger.Error("shim construction failed", "target", target, "err", err)
 		if connInfo != nil {
