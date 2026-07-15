@@ -1,2 +1,9 @@
 bin/
 certs/
+
+node_modules/
+dist
+out
+.DS_Store
+.eslintcache
+*.log*
