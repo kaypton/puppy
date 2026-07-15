@@ -13,10 +13,21 @@ import (
 	"github.com/puppy/pkg/adapter/direct"
 	adapterhttpproxy "github.com/puppy/pkg/adapter/httpproxy"
 	adaptersocksproxy "github.com/puppy/pkg/adapter/socksproxy"
+	"github.com/puppy/pkg/common/stats"
 	frontendhttpproxy "github.com/puppy/pkg/httpproxy"
 	frontendsocksproxy "github.com/puppy/pkg/socksproxy"
 	frontendtunproxy "github.com/puppy/pkg/tunproxy"
 )
+
+// testStatsDeps returns a stats.Deps suitable for buildFrontend in tests.
+func testStatsDeps(name string) stats.Deps {
+	return stats.Deps{
+		Name:    name,
+		Stats:   stats.NewStatsRegistry(),
+		ConnReg: stats.NewConnectionRegistry(),
+		Bus:     stats.NewEventBus(),
+	}
+}
 
 const validConfiguration = `
 frontend = "office_proxy"
@@ -536,7 +547,7 @@ func TestBuildSelectedFrontend(t *testing.T) {
 		t.Fatalf("loadConfiguration: %v", err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	frontend, err := buildFrontend(config, logger)
+	frontend, err := buildFrontend(config, logger, testStatsDeps(config.Frontend))
 	if err != nil {
 		t.Fatalf("buildFrontend: %v", err)
 	}
@@ -551,7 +562,7 @@ func TestBuildSelectedSocksFrontend(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfiguration: %v", err)
 	}
-	frontend, err := buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	frontend, err := buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)), testStatsDeps(config.Frontend))
 	if err != nil {
 		t.Fatalf("buildFrontend: %v", err)
 	}
@@ -579,7 +590,7 @@ shim = "default_tunnel"
 	if err != nil {
 		t.Fatalf("loadConfiguration: %v", err)
 	}
-	frontend, err := buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	frontend, err := buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)), testStatsDeps(config.Frontend))
 	if err != nil {
 		t.Fatalf("buildFrontend: %v", err)
 	}
@@ -607,7 +618,7 @@ shim = "default_tunnel"
 	if err != nil {
 		t.Fatalf("loadConfiguration: %v", err)
 	}
-	_, err = buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	_, err = buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)), testStatsDeps(config.Frontend))
 	if err == nil || !strings.Contains(err.Error(), "fallback must support udp") {
 		t.Fatalf("buildFrontend error = %v, want fallback UDP capability error", err)
 	}
@@ -670,4 +681,127 @@ func TestRootCommandHidesUsageForRuntimeErrors(t *testing.T) {
 	if strings.Contains(output.String(), "Usage:") {
 		t.Fatalf("runtime error printed usage: %q", output.String())
 	}
+}
+
+func TestDashboardConfigurationValidate(t *testing.T) {
+	valid := DashboardConfiguration{Enabled: true, ListenAddress: "127.0.0.1", ListenPort: 8443}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid config: unexpected error: %v", err)
+	}
+
+	disabled := DashboardConfiguration{Enabled: false}
+	if err := disabled.Validate(); err != nil {
+		t.Fatalf("disabled config should skip validation: %v", err)
+	}
+
+	cases := []struct {
+		name    string
+		cfg     DashboardConfiguration
+		wantErr string
+	}{
+		{"missing address", DashboardConfiguration{Enabled: true, ListenPort: 8443}, "listen_address"},
+		{"missing port", DashboardConfiguration{Enabled: true, ListenAddress: "127.0.0.1"}, "listen_port"},
+		{"cert only", DashboardConfiguration{Enabled: true, ListenAddress: "127.0.0.1", ListenPort: 8443, TLSCertFile: "cert.pem"}, "tls_cert_file and tls_key_file"},
+		{"key only", DashboardConfiguration{Enabled: true, ListenAddress: "127.0.0.1", ListenPort: 8443, TLSKeyFile: "key.pem"}, "tls_cert_file and tls_key_file"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadConfigurationWithDashboard(t *testing.T) {
+	contents := validConfiguration + `
+[dashboard]
+enabled = true
+listen_address = "127.0.0.1"
+listen_port = 8443
+token = "test-token"
+`
+	config, err := loadConfiguration(writeConfig(t, contents))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+	if config.Dashboard == nil {
+		t.Fatal("Dashboard config should not be nil")
+	}
+	if !config.Dashboard.Enabled {
+		t.Error("Dashboard should be enabled")
+	}
+	if config.Dashboard.ListenPort != 8443 {
+		t.Errorf("ListenPort = %d, want 8443", config.Dashboard.ListenPort)
+	}
+	if config.Dashboard.Token != "test-token" {
+		t.Errorf("Token = %q, want test-token", config.Dashboard.Token)
+	}
+}
+
+func TestLoadConfigurationRejectsUnknownDashboardField(t *testing.T) {
+	contents := validConfiguration + `
+[dashboard]
+enabled = true
+listen_address = "127.0.0.1"
+listen_port = 8443
+unknown_field = "bad"
+`
+	_, err := loadConfiguration(writeConfig(t, contents))
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected unknown field error, got: %v", err)
+	}
+}
+
+func TestProviders(t *testing.T) {
+	config, err := loadConfiguration(writeConfig(t, validConfiguration))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+
+	t.Run("config provider", func(t *testing.T) {
+		cp := &configProvider{config: config}
+		result := cp.SanitizedConfig().(map[string]any)
+		if result["frontend"] != "office_proxy" {
+			t.Errorf("frontend = %v, want office_proxy", result["frontend"])
+		}
+		frontends := result["frontends"].(map[string]any)
+		if len(frontends) != 4 {
+			t.Errorf("frontends count = %d, want 4", len(frontends))
+		}
+	})
+
+	t.Run("frontend provider", func(t *testing.T) {
+		fp := &frontendProvider{
+			config:   config,
+			statuses: map[string]string{"office_proxy": "running"},
+		}
+		frontends := fp.Frontends()
+		if len(frontends) != 4 {
+			t.Fatalf("frontends count = %d, want 4", len(frontends))
+		}
+		fp.setStatus("office_proxy", "stopped")
+		frontends = fp.Frontends()
+		for _, fe := range frontends {
+			if fe.Name == "office_proxy" && fe.Status != "stopped" {
+				t.Errorf("status = %s, want stopped", fe.Status)
+			}
+		}
+	})
+
+	t.Run("backend provider", func(t *testing.T) {
+		bp := &backendProvider{config: config}
+		backends := bp.Backends()
+		if len(backends) != 3 {
+			t.Fatalf("backends count = %d, want 3", len(backends))
+		}
+		for _, be := range backends {
+			if be.Name == "direct_out" {
+				if len(be.Capabilities) != 2 {
+					t.Errorf("direct_out capabilities = %d, want 2", len(be.Capabilities))
+				}
+			}
+		}
+	})
 }

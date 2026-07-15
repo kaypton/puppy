@@ -25,6 +25,7 @@ import (
 
 	"github.com/puppy/pkg/adapter/direct"
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
 )
 
 // errorBackend is a common.Backend whose Dial always returns err.
@@ -637,5 +638,137 @@ func TestServer_ContextCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run did not return after cancel")
+	}
+}
+
+// startServerWithStats is like startServer but also injects stats dependencies
+// and returns them for assertion.
+func startServerWithStats(t *testing.T, cfg ServerConfiguration, backend common.Backend) (addr string, registry *stats.StatsRegistry, connReg *stats.ConnectionRegistry, cancel context.CancelFunc) {
+	t.Helper()
+	registry = stats.NewStatsRegistry()
+	connReg = stats.NewConnectionRegistry()
+	bus := stats.NewEventBus()
+	cfg.Stats = registry
+	cfg.ConnReg = connReg
+	cfg.Bus = bus
+	cfg.Name = "test-frontend"
+	addr, cancel, _ = startServer(t, cfg, backend)
+	return addr, registry, connReg, cancel
+}
+
+func TestServer_StatsTracking(t *testing.T) {
+	upstreamAddr := echoUpstream(t)
+	addr, registry, connReg, _ := startServerWithStats(t, ServerConfiguration{}, direct.NewBackend())
+
+	conn := dialThroughProxy(t, addr, upstreamAddr, "")
+	msg := []byte("stats-test-data!")
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	_ = conn.Close()
+
+	// Wait briefly for the server to process the connection close and update
+	// stats counters.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := registry.Snapshot()
+		if snap.TotalConnections >= 1 && snap.DialSuccesses >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	snap := registry.Snapshot()
+	if snap.TotalConnections < 1 {
+		t.Errorf("TotalConnections = %d, want >= 1", snap.TotalConnections)
+	}
+	if snap.DialSuccesses != 1 {
+		t.Errorf("DialSuccesses = %d, want 1", snap.DialSuccesses)
+	}
+	if snap.DialFailures != 0 {
+		t.Errorf("DialFailures = %d, want 0", snap.DialFailures)
+	}
+	if snap.BytesIn < uint64(len(msg)) {
+		t.Errorf("BytesIn = %d, want >= %d", snap.BytesIn, len(msg))
+	}
+	if snap.BytesOut < uint64(len(msg)) {
+		t.Errorf("BytesOut = %d, want >= %d", snap.BytesOut, len(msg))
+	}
+
+	// After the connection closes, active count should return to 0.
+	deadline = time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		snap := registry.Snapshot()
+		if snap.ActiveConnections == 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snap = registry.Snapshot()
+	if snap.ActiveConnections != 0 {
+		t.Errorf("ActiveConnections = %d, want 0 after close", snap.ActiveConnections)
+	}
+	if connReg.Count() != 0 {
+		t.Errorf("connReg.Count = %d, want 0 after close", connReg.Count())
+	}
+}
+
+func TestServer_StatsDialFailure(t *testing.T) {
+	addr, registry, _, _ := startServerWithStats(t, ServerConfiguration{}, &errorBackend{err: errors.New("upstream unreachable")})
+
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if _, err := io.WriteString(conn, "CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n"); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if registry.Snapshot().DialFailures >= 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	snap := registry.Snapshot()
+	if snap.DialFailures != 1 {
+		t.Errorf("DialFailures = %d, want 1", snap.DialFailures)
+	}
+	if snap.DialSuccesses != 0 {
+		t.Errorf("DialSuccesses = %d, want 0", snap.DialSuccesses)
+	}
+}
+
+func TestServer_StatsNilSafe(t *testing.T) {
+	// Verify the server works correctly with nil stats deps (backward compat).
+	upstreamAddr := echoUpstream(t)
+	proxyAddr, _, _ := startServer(t, ServerConfiguration{}, direct.NewBackend())
+
+	conn := dialThroughProxy(t, proxyAddr, upstreamAddr, "")
+	msg := []byte("nil-stats-ok")
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	got := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if string(got) != string(msg) {
+		t.Fatalf("echo = %q, want %q", got, msg)
 	}
 }

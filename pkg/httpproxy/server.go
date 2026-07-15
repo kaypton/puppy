@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/counting"
+	"github.com/puppy/pkg/common/stats"
 	"github.com/puppy/pkg/shim"
 )
 
@@ -51,6 +53,17 @@ type ServerConfiguration struct {
 	Camouflage bool
 	// CamouflageMethod selects the disguise. Empty defaults to Return404.
 	CamouflageMethod CamouflageMethod
+	// Name identifies this frontend in stats and dashboard views. When
+	// non-empty, accepted connections are attributed to this name.
+	Name string
+	// Stats receives global counter updates. When nil, no global statistics
+	// are collected.
+	Stats *stats.StatsRegistry
+	// ConnReg tracks active connections for this frontend. When nil, no
+	// per-connection registry is maintained.
+	ConnReg *stats.ConnectionRegistry
+	// Bus broadcasts lifecycle events. When nil, no events are published.
+	Bus *stats.EventBus
 }
 
 // Server is an HTTP CONNECT proxy that fronts a ShimServer per connection.
@@ -165,6 +178,8 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 	// a goroutine forever.
 	_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
 
+	s.config.Stats.IncTotal()
+
 	preparedConn, err := s.prepareFrontendConn(ctx, conn)
 	if err != nil {
 		s.logger.Debug("TLS handshake failed", "remote", conn.RemoteAddr(), "err", err)
@@ -183,11 +198,14 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 
 	upstream, err := s.backend.Dial(ctx, target, s.dialer)
 	if err != nil {
+		s.config.Stats.IncDialFailure()
+		s.config.Bus.Publish(stats.Event{Type: stats.EventDialFailed, Frontend: s.config.Name, Target: target.Address(), RemoteAddr: conn.RemoteAddr().String(), Message: err.Error()})
 		s.writeError(conn, httpStatusBadGateway, nil)
 		s.logger.Info("backend dial failed", "target", target.Address(), "err", err)
 		return
 	}
 	defer func() { _ = upstream.Close() }()
+	s.config.Stats.IncDialSuccess()
 
 	// Tell the client the tunnel is up. Per RFC 7231 the 2xx response has no
 	// body and the connection becomes a raw tunnel.
@@ -196,19 +214,50 @@ func (s *Server) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
+	// Register the connection for stats tracking and wrap the frontend side
+	// with a counting connection so per-connection and global byte counters
+	// stay in sync.
+	var connInfo *stats.ConnectionInfo
+	if s.config.ConnReg != nil {
+		connInfo = s.config.ConnReg.Register(&stats.ConnectionInfo{
+			ID:         stats.GenerateConnectionID(),
+			Frontend:   s.config.Name,
+			RemoteAddr: conn.RemoteAddr().String(),
+			Target:     target,
+			Protocol:   target.Protocol,
+			Network:    target.Net(),
+		})
+		s.config.Stats.IncActive()
+		s.config.Bus.Publish(stats.Event{Type: stats.EventConnect, Frontend: s.config.Name, ConnectionID: connInfo.ID, Target: target.Address(), RemoteAddr: conn.RemoteAddr().String()})
+	}
+	wrappedFrontend := frontend
+	if s.config.ConnReg != nil || s.config.Stats != nil {
+		wrappedFrontend = counting.NewConn(frontend, connInfo, s.config.Stats)
+	}
+
 	shimServer, err := shim.NewShimServer(shim.ShimServerConfiguration{
-		Frontend:   frontend,
+		Frontend:   wrappedFrontend,
 		Backend:    upstream,
 		BufferSize: s.config.ShimBufferSize,
 	})
 	if err != nil {
 		s.logger.Error("shim construction failed", "target", target, "err", err)
+		if connInfo != nil {
+			s.config.ConnReg.Remove(connInfo.ID)
+			s.config.Stats.DecActive()
+		}
 		return
 	}
 
 	s.logger.Info("tunnel established", "target", target.Address(), "remote", conn.RemoteAddr())
-	_ = shimServer.Run(ctx)
+	_, _, _ = shimServer.Run(ctx)
 	s.logger.Info("tunnel closed", "target", target.Address())
+
+	if connInfo != nil {
+		s.config.ConnReg.Remove(connInfo.ID)
+		s.config.Stats.DecActive()
+		s.config.Bus.Publish(stats.Event{Type: stats.EventDisconnect, Frontend: s.config.Name, ConnectionID: connInfo.ID, Target: target.Address()})
+	}
 }
 
 // prepareFrontendConn completes the optional TLS transport handshake before

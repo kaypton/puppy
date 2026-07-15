@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/puppy/pkg/adapter/direct"
+	"github.com/puppy/pkg/common/stats"
 )
 
 func TestConfigurationValidate(t *testing.T) {
@@ -59,7 +60,7 @@ func TestConfigurationServerConfig(t *testing.T) {
 		Shim:          "tunnel",
 	}
 
-	serverConfig := config.ServerConfig(backend, 65536, logger)
+	serverConfig := config.ServerConfig(backend, 65536, logger, stats.Deps{Name: "test", Stats: stats.NewStatsRegistry(), ConnReg: stats.NewConnectionRegistry(), Bus: stats.NewEventBus()})
 	if serverConfig.ListenAddress != config.ListenAddress || serverConfig.ListenPort != config.ListenPort {
 		t.Fatalf("listen configuration = %s:%d", serverConfig.ListenAddress, serverConfig.ListenPort)
 	}
@@ -71,5 +72,8 @@ func TestConfigurationServerConfig(t *testing.T) {
 	}
 	if serverConfig.Backend != backend || serverConfig.ShimBufferSize != 65536 || serverConfig.Logger != logger {
 		t.Fatal("runtime dependencies were not attached")
+	}
+	if serverConfig.Name != "test" || serverConfig.Stats == nil || serverConfig.ConnReg == nil || serverConfig.Bus == nil {
+		t.Fatal("stats dependencies were not attached")
 	}
 }

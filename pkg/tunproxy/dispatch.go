@@ -121,7 +121,7 @@ func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
 		return
 	}
 	d.logger.Info("tunproxy: tcp tunnel established", "target", target.Address())
-	_ = s.Run(d.ctx)
+	_, _, _ = s.Run(d.ctx)
 }
 
 // HandleUDP is invoked by the netstack UDP forwarder for each new datagram
@@ -244,7 +244,7 @@ func (d *dispatcher) serveInterceptedDNSStream(frontend io.ReadWriteCloser) {
 		d.logger.Error("tunproxy: systemd-resolved tcp dns shim construction failed", "target", target.Address(), "err", err)
 		return
 	}
-	_ = s.Run(d.ctx)
+	_, _, _ = s.Run(d.ctx)
 }
 
 // resolveInterceptedDNSDatagram carries one redirected UDP DNS query over a

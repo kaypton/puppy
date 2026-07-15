@@ -24,13 +24,18 @@ type ShimServerConfiguration struct {
 	BufferSize int
 }
 
+// Validate checks the runtime configuration fields.
+func (c ShimServerConfiguration) Validate() error {
+	if c.Frontend == nil {
+		return errors.New("shim: frontend is nil")
+	}
+	if c.Backend == nil {
+		return errors.New("shim: backend is nil")
+	}
+	return nil
+}
+
 func NewShimServer(config ShimServerConfiguration) (*ShimServer, error) {
-	if config.Frontend == nil {
-		return nil, errors.New("shim: frontend is nil")
-	}
-	if config.Backend == nil {
-		return nil, errors.New("shim: backend is nil")
-	}
 	bufSize := config.BufferSize
 	if bufSize <= 0 {
 		bufSize = defaultBufferSize
@@ -50,12 +55,19 @@ func (s *ShimServer) closeBackend() {
 	s.beOnce.Do(func() { _ = s.backend.Close() })
 }
 
-func (s *ShimServer) Run(ctx context.Context) error {
+// Run copies bytes between the frontend and backend connections until both
+// directions complete or ctx is cancelled. It returns the number of bytes
+// copied in each direction: clientToBackend (frontend→backend) and
+// backendToClient (backend→frontend). The error return is always nil and is
+// retained for API stability.
+func (s *ShimServer) Run(ctx context.Context) (clientToBackend, backendToClient int64, err error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var wg sync.WaitGroup
 	wg.Add(2)
+
+	var feToBe, beToFe int64
 
 	// frontend -> backend: when this direction ends, the frontend side has
 	// stopped sending; close the backend so the other goroutine can exit.
@@ -63,7 +75,8 @@ func (s *ShimServer) Run(ctx context.Context) error {
 		defer wg.Done()
 		defer s.closeBackend()
 		buf := make([]byte, s.bufSize)
-		_, _ = io.CopyBuffer(s.backend, s.frontend, buf)
+		n, _ := io.CopyBuffer(s.backend, s.frontend, buf)
+		feToBe = n
 	}()
 
 	// backend -> frontend: symmetric to the above.
@@ -71,7 +84,8 @@ func (s *ShimServer) Run(ctx context.Context) error {
 		defer wg.Done()
 		defer s.closeFrontend()
 		buf := make([]byte, s.bufSize)
-		_, _ = io.CopyBuffer(s.frontend, s.backend, buf)
+		n, _ := io.CopyBuffer(s.frontend, s.backend, buf)
+		beToFe = n
 	}()
 
 	// On ctx cancellation, close both ends to unblock any pending reads.
@@ -82,5 +96,5 @@ func (s *ShimServer) Run(ctx context.Context) error {
 	}()
 
 	wg.Wait()
-	return nil
+	return feToBe, beToFe, nil
 }

@@ -5,6 +5,7 @@ import (
 	"log/slog"
 
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
 )
 
 // Type identifies the SOCKS5 proxy frontend in a named configuration group.
@@ -54,7 +55,7 @@ func (c Configuration) Validate() error {
 }
 
 // ServerConfig adds runtime dependencies to the frontend's file configuration.
-func (c Configuration) ServerConfig(backend common.Backend, shimBufferSize int, logger *slog.Logger) ServerConfiguration {
+func (c Configuration) ServerConfig(backend common.Backend, shimBufferSize int, logger *slog.Logger, statsDeps stats.Deps) ServerConfiguration {
 	return ServerConfiguration{
 		ListenAddress:  c.ListenAddress,
 		ListenPort:     c.ListenPort,
@@ -65,5 +66,9 @@ func (c Configuration) ServerConfig(backend common.Backend, shimBufferSize int, 
 		Backend:        backend,
 		ShimBufferSize: shimBufferSize,
 		Logger:         logger,
+		Name:           statsDeps.Name,
+		Stats:          statsDeps.Stats,
+		ConnReg:        statsDeps.ConnReg,
+		Bus:            statsDeps.Bus,
 	}
 }

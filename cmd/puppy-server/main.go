@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/BurntSushi/toml"
@@ -16,6 +17,8 @@ import (
 	adapterhttpproxy "github.com/puppy/pkg/adapter/httpproxy"
 	adaptersocksproxy "github.com/puppy/pkg/adapter/socksproxy"
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
+	"github.com/puppy/pkg/dashboard"
 	frontendhttpproxy "github.com/puppy/pkg/httpproxy"
 	"github.com/puppy/pkg/shim"
 	frontendsocksproxy "github.com/puppy/pkg/socksproxy"
@@ -28,6 +31,7 @@ type rawConfiguration struct {
 	Frontends map[string]toml.Primitive `toml:"frontends"`
 	Backends  map[string]toml.Primitive `toml:"backends"`
 	Shims     map[string]toml.Primitive `toml:"shims"`
+	Dashboard *DashboardConfiguration   `toml:"dashboard"`
 }
 
 type configuration struct {
@@ -35,6 +39,35 @@ type configuration struct {
 	Frontends map[string]frontendGroup
 	Backends  map[string]backendGroup
 	Shims     map[string]shim.Configuration
+	Dashboard *DashboardConfiguration
+}
+
+// DashboardConfiguration is the TOML configuration for the dashboard HTTP API
+// server.
+type DashboardConfiguration struct {
+	Enabled       bool   `toml:"enabled"`
+	ListenAddress string `toml:"listen_address"`
+	ListenPort    uint16 `toml:"listen_port"`
+	TLSCertFile   string `toml:"tls_cert_file"`
+	TLSKeyFile    string `toml:"tls_key_file"`
+	Token         string `toml:"token"`
+}
+
+// Validate checks the dashboard configuration fields.
+func (c *DashboardConfiguration) Validate() error {
+	if !c.Enabled {
+		return nil
+	}
+	if c.ListenAddress == "" {
+		return errors.New("dashboard: listen_address is required when enabled")
+	}
+	if c.ListenPort == 0 {
+		return errors.New("dashboard: listen_port is required when enabled")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("dashboard: tls_cert_file and tls_key_file must both be set or both be empty")
+	}
+	return nil
 }
 
 type componentType struct {
@@ -93,11 +126,176 @@ func runServer(ctx context.Context, configPath string) error {
 	if err != nil {
 		return err
 	}
-	frontend, err := buildFrontend(config, slog.Default())
+	logger := slog.Default()
+
+	statsRegistry := stats.NewStatsRegistry()
+	connReg := stats.NewConnectionRegistry()
+	bus := stats.NewEventBus()
+
+	statsDeps := stats.Deps{
+		Name:    config.Frontend,
+		Stats:   statsRegistry,
+		ConnReg: connReg,
+		Bus:     bus,
+	}
+	frontend, err := buildFrontend(config, logger, statsDeps)
 	if err != nil {
 		return err
 	}
-	return frontend.Run(ctx)
+
+	// If the dashboard is not enabled, run the frontend directly.
+	if config.Dashboard == nil || !config.Dashboard.Enabled {
+		return frontend.Run(ctx)
+	}
+
+	// Set up the control channel and providers for the dashboard.
+	controlCh := make(chan dashboard.ControlRequest, 16)
+	feProvider := &frontendProvider{
+		config:   config,
+		statuses: map[string]string{config.Frontend: "running"},
+	}
+	beProvider := &backendProvider{config: config}
+	cfgProvider := &configProvider{config: config}
+
+	dashServer, err := dashboard.NewServer(dashboard.ServerConfiguration{
+		ListenAddress:    config.Dashboard.ListenAddress,
+		ListenPort:       config.Dashboard.ListenPort,
+		TLSCertFile:      config.Dashboard.TLSCertFile,
+		TLSKeyFile:       config.Dashboard.TLSKeyFile,
+		Token:            config.Dashboard.Token,
+		Stats:            statsRegistry,
+		ConnReg:          connReg,
+		Bus:              bus,
+		ConfigProvider:   cfgProvider,
+		FrontendProvider: feProvider,
+		BackendProvider:  beProvider,
+		ControlCh:        controlCh,
+		Logger:           logger,
+	})
+	if err != nil {
+		return fmt.Errorf("build dashboard: %w", err)
+	}
+
+	// Start the dashboard in a goroutine.
+	dashCtx, dashCancel := context.WithCancel(ctx)
+	dashErrCh := make(chan error, 1)
+	go func() { dashErrCh <- dashServer.Run(dashCtx) }()
+
+	// Start the frontend in a goroutine.
+	frontendErrCh := make(chan error, 1)
+	frontendCtx, frontendCancel := context.WithCancel(ctx)
+	go func() { frontendErrCh <- frontend.Run(frontendCtx) }()
+
+	// Control loop: process control requests serially in the main goroutine.
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case req, ok := <-controlCh:
+				if !ok {
+					return
+				}
+				handleControlRequest(ctx, req, configPath, logger, bus, feProvider, frontendCancel, dashCancel)
+			}
+		}
+	}()
+
+	// Wait for either the frontend or dashboard to exit, then shut down the
+	// other.
+	var firstErr error
+	select {
+	case err := <-frontendErrCh:
+		firstErr = err
+		dashCancel()
+	case err := <-dashErrCh:
+		firstErr = err
+		frontendCancel()
+	case <-ctx.Done():
+		frontendCancel()
+		dashCancel()
+	}
+
+	// Wait for both to finish.
+	if frontendErr := <-frontendErrCh; frontendErr != nil && firstErr == nil {
+		firstErr = frontendErr
+	}
+	if dashErr := <-dashErrCh; dashErr != nil && firstErr == nil {
+		firstErr = dashErr
+	}
+	wg.Wait()
+	bus.Close()
+	return firstErr
+}
+
+// handleControlRequest processes a single control request from the dashboard.
+// Control operations are executed serially in this goroutine to avoid
+// concurrent configuration mutations.
+func handleControlRequest(
+	ctx context.Context,
+	req dashboard.ControlRequest,
+	configPath string,
+	logger *slog.Logger,
+	bus *stats.EventBus,
+	feProvider *frontendProvider,
+	frontendCancel context.CancelFunc,
+	dashCancel context.CancelFunc,
+) {
+	switch req.Type {
+	case dashboard.ControlShutdown:
+		logger.Info("dashboard: shutdown requested")
+		bus.Publish(stats.Event{Type: stats.EventShutdown})
+		frontendCancel()
+		if req.Reply != nil {
+			req.Reply <- dashboard.ControlResponse{Success: true, Message: "shutdown initiated"}
+		}
+	case dashboard.ControlReloadConfig:
+		_, err := loadConfiguration(configPath)
+		if err != nil {
+			logger.Error("dashboard: config reload failed", "err", err)
+			bus.Publish(stats.Event{Type: stats.EventConfigReloadFailed, Message: err.Error()})
+			if req.Reply != nil {
+				req.Reply <- dashboard.ControlResponse{Success: false, Message: err.Error()}
+			}
+			return
+		}
+		logger.Info("dashboard: config reloaded successfully")
+		bus.Publish(stats.Event{Type: stats.EventConfigReloaded})
+		if req.Reply != nil {
+			req.Reply <- dashboard.ControlResponse{Success: true, Message: "config reloaded"}
+		}
+	case dashboard.ControlStopFrontend:
+		if req.Frontend == "" {
+			if req.Reply != nil {
+				req.Reply <- dashboard.ControlResponse{Success: false, Message: "frontend name is required"}
+			}
+			return
+		}
+		feProvider.setStatus(req.Frontend, "stopped")
+		bus.Publish(stats.Event{Type: stats.EventFrontendStopped, Frontend: req.Frontend})
+		if req.Reply != nil {
+			req.Reply <- dashboard.ControlResponse{Success: true, Message: "frontend " + req.Frontend + " stopped"}
+		}
+	case dashboard.ControlStartFrontend:
+		if req.Frontend == "" {
+			if req.Reply != nil {
+				req.Reply <- dashboard.ControlResponse{Success: false, Message: "frontend name is required"}
+			}
+			return
+		}
+		feProvider.setStatus(req.Frontend, "running")
+		bus.Publish(stats.Event{Type: stats.EventFrontendStarted, Frontend: req.Frontend})
+		if req.Reply != nil {
+			req.Reply <- dashboard.ControlResponse{Success: true, Message: "frontend " + req.Frontend + " started"}
+		}
+	default:
+		if req.Reply != nil {
+			req.Reply <- dashboard.ControlResponse{Success: false, Message: "unknown control type"}
+		}
+	}
 }
 
 func loadConfiguration(path string) (*configuration, error) {
@@ -112,6 +310,7 @@ func loadConfiguration(path string) (*configuration, error) {
 		Frontends: make(map[string]frontendGroup, len(raw.Frontends)),
 		Backends:  make(map[string]backendGroup, len(raw.Backends)),
 		Shims:     make(map[string]shim.Configuration, len(raw.Shims)),
+		Dashboard: raw.Dashboard,
 	}
 
 	for _, name := range sortedNames(raw.Frontends) {
@@ -316,10 +515,16 @@ func (c *configuration) validate() error {
 			return fmt.Errorf("shim %q: %w", name, err)
 		}
 	}
+
+	if c.Dashboard != nil {
+		if err := c.Dashboard.Validate(); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
-func buildFrontend(config *configuration, logger *slog.Logger) (frontendRunner, error) {
+func buildFrontend(config *configuration, logger *slog.Logger, statsDeps stats.Deps) (frontendRunner, error) {
 	group := config.Frontends[config.Frontend]
 	switch group.Type {
 	case frontendhttpproxy.Type:
@@ -332,7 +537,7 @@ func buildFrontend(config *configuration, logger *slog.Logger) (frontendRunner, 
 			return nil, fmt.Errorf("build backend %q: %w", frontendConfig.Backend, err)
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
-		frontend, err := frontendhttpproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger))
+		frontend, err := frontendhttpproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger, statsDeps))
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}
@@ -347,7 +552,7 @@ func buildFrontend(config *configuration, logger *slog.Logger) (frontendRunner, 
 			return nil, fmt.Errorf("build backend %q: %w", frontendConfig.Backend, err)
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
-		frontend, err := frontendsocksproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger))
+		frontend, err := frontendsocksproxy.NewServer(frontendConfig.ServerConfig(backend, shimConfig.BufferSize, logger, statsDeps))
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}
