@@ -14,6 +14,7 @@ import (
 	adapterhttpproxy "github.com/puppy/pkg/adapter/httpproxy"
 	adaptersocksproxy "github.com/puppy/pkg/adapter/socksproxy"
 	frontendhttpproxy "github.com/puppy/pkg/httpproxy"
+	frontendsocksproxy "github.com/puppy/pkg/socksproxy"
 	frontendtunproxy "github.com/puppy/pkg/tunproxy"
 )
 
@@ -37,6 +38,13 @@ listen_address = "127.0.0.1"
 listen_port = 8081
 backend = "corporate_proxy"
 shim = "large_tunnel"
+
+[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+backend = "direct_out"
+shim = "default_tunnel"
 
 [frontends.unused_tun]
 type = "tun"
@@ -86,8 +94,8 @@ func TestLoadConfiguration(t *testing.T) {
 	if config.Frontend != "office_proxy" {
 		t.Fatalf("Frontend = %q, want office_proxy", config.Frontend)
 	}
-	if len(config.Frontends) != 3 || len(config.Backends) != 3 || len(config.Shims) != 2 {
-		t.Fatalf("group counts = (%d, %d, %d), want (3, 3, 2)", len(config.Frontends), len(config.Backends), len(config.Shims))
+	if len(config.Frontends) != 4 || len(config.Backends) != 3 || len(config.Shims) != 2 {
+		t.Fatalf("group counts = (%d, %d, %d), want (4, 3, 2)", len(config.Frontends), len(config.Backends), len(config.Shims))
 	}
 	frontendGroup := config.Frontends["office_proxy"]
 	frontend, ok := frontendGroup.Configuration.(frontendhttpproxy.Configuration)
@@ -115,6 +123,17 @@ func TestLoadConfiguration(t *testing.T) {
 	}
 	if socksBackend.ProxyAddress != "socks.example.com:1080" || socksBackend.Username != "carol" || socksBackend.Password != "swordfish" {
 		t.Fatalf("SOCKS backend = %#v", socksBackend)
+	}
+	socksFrontendGroup := config.Frontends["unused_socks"]
+	socksFrontend, ok := socksFrontendGroup.Configuration.(frontendsocksproxy.Configuration)
+	if !ok {
+		t.Fatalf("socks frontend configuration type = %T", socksFrontendGroup.Configuration)
+	}
+	if socksFrontend.ListenAddress != "127.0.0.1" || socksFrontend.ListenPort != 1080 {
+		t.Fatalf("socks frontend listen = %s:%d", socksFrontend.ListenAddress, socksFrontend.ListenPort)
+	}
+	if socksFrontend.Backend != "direct_out" || socksFrontend.Shim != "default_tunnel" {
+		t.Fatalf("socks frontend references = (%q, %q), want (direct_out, default_tunnel)", socksFrontend.Backend, socksFrontend.Shim)
 	}
 	if got := config.Shims["large_tunnel"].BufferSize; got != 65536 {
 		t.Fatalf("large_tunnel buffer size = %d, want 65536", got)
@@ -342,6 +361,77 @@ proxy_address = "proxy.example.com:3128"`, 1),
 			wantErr: `frontend "unused_proxy": backend "missing" does not exist`,
 		},
 		{
+			name: "socks frontend missing address",
+			config: strings.Replace(
+				validConfiguration,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080`,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_port = 1080`,
+				1,
+			),
+			wantErr: `frontend "unused_socks": listen_address`,
+		},
+		{
+			name: "socks frontend unpaired credentials",
+			config: strings.Replace(
+				validConfiguration,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+backend = "direct_out"`,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+username = "alice"
+backend = "direct_out"`,
+				1,
+			),
+			wantErr: `frontend "unused_socks": username and password`,
+		},
+		{
+			name: "socks frontend missing backend reference",
+			config: strings.Replace(
+				validConfiguration,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+backend = "direct_out"`,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+backend = "missing_socks"`,
+				1,
+			),
+			wantErr: `frontend "unused_socks": backend "missing_socks" does not exist`,
+		},
+		{
+			name: "socks frontend unpaired tls cert",
+			config: strings.Replace(
+				validConfiguration,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+backend = "direct_out"`,
+				`[frontends.unused_socks]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+tls_cert_file = "proxy-cert.pem"
+backend = "direct_out"`,
+				1,
+			),
+			wantErr: `frontend "unused_socks": tls_cert_file and tls_key_file`,
+		},
+		{
 			name:    "missing shim reference",
 			config:  strings.Replace(validConfiguration, `shim = "large_tunnel"`, `shim = "missing"`, 1),
 			wantErr: `frontend "unused_proxy": shim "missing" does not exist`,
@@ -447,6 +537,21 @@ func TestBuildSelectedFrontend(t *testing.T) {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	frontend, err := buildFrontend(config, logger)
+	if err != nil {
+		t.Fatalf("buildFrontend: %v", err)
+	}
+	if frontend == nil {
+		t.Fatal("buildFrontend returned nil")
+	}
+}
+
+func TestBuildSelectedSocksFrontend(t *testing.T) {
+	contents := strings.Replace(validConfiguration, `frontend = "office_proxy"`, `frontend = "unused_socks"`, 1)
+	config, err := loadConfiguration(writeConfig(t, contents))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+	frontend, err := buildFrontend(config, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("buildFrontend: %v", err)
 	}

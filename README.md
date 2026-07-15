@@ -1,16 +1,18 @@
 # Puppy
 
-Puppy 是一个用 Go 编写的代理服务，支持两种工作模式：
+Puppy 是一个用 Go 编写的代理服务，支持三种工作模式：
 
 - **HTTP CONNECT 代理**：在本地监听一个 HTTP(S) 代理端口，供浏览器、CLI 或任意支持 HTTP 代理的应用使用。
+- **SOCKS5 代理**：在本地监听一个 SOCKS5 代理端口（可选 TLS 与用户名/密码认证），供支持 SOCKS5 的应用使用。
 - **TUN 全局代理**：创建虚拟网卡接管整机 TCP/UDP 流量，适合不识别代理设置的应用或全局转发场景。
 
-两种模式都通过一份 TOML 配置文件组装，可自由组合**前端 (frontend)**、**后端 (backend)**、**隧道 (shim)** 三类组件。
+三种模式都通过一份 TOML 配置文件组装，可自由组合**前端 (frontend)**、**后端 (backend)**、**隧道 (shim)** 三类组件。
 
 ## 特性
 
 - HTTP CONNECT 代理，可选 TLS（HTTPS 代理）与 Basic Auth 认证
 - 伪装模式：未认证请求返回 404，使代理端口看起来像普通 Web 服务
+- SOCKS5 代理，可选 TLS（SOCKS5-over-TLS）与 RFC 1929 用户名/密码认证
 - 上游 HTTP CONNECT 代理链式转发（可选 TLS 到上游）
 - 上游 SOCKS5 代理链式转发（可选 TLS 到上游）
 - TUN 模式整机接管，支持 TCP/UDP，自动安装/恢复路由
@@ -133,7 +135,58 @@ password      = ""
 tls           = false     # 上游为 TLS 端口时设为 true
 ```
 
-### 4. TUN 全局代理 → 直连
+### 4. 本地 SOCKS5 代理 → 直连
+
+本机或局域网客户端把 puppy 当作普通 SOCKS5 代理，puppy 直接连接目标。仅支持 TCP（CONNECT）。
+
+适用场景：
+
+- 给支持 SOCKS5 的浏览器、CLI（`curl --socks5`）、IM 等工具统一出口
+- 部分应用只支持 SOCKS5 而不支持 HTTP 代理
+- 对外开放时配合 TLS + 认证，避免明文暴露凭据
+
+```toml
+frontend = "local_socks_proxy"
+
+[frontends.local_socks_proxy]
+type            = "socksproxy"
+listen_address  = "127.0.0.1"   # 对外开放改为 0.0.0.0
+listen_port     = 1080
+username        = "test"
+password        = "test12345"
+backend         = "direct_out"
+shim            = "default_tunnel"
+
+[backends.direct_out]
+type = "direct"
+```
+
+### 5. 本地 SOCKS5 代理 → 上游代理
+
+puppy 在客户端与上游代理之间再加一层，可在本地加 TLS、认证。上游可以是 HTTP CONNECT 代理或 SOCKS5 代理；仅支持 TCP。
+
+适用场景：
+
+- 上游是公司/学校强制使用的代理，但你想在本地用不带认证的工具
+- 想给上游代理连接套上 TLS
+- 客户端只支持 SOCKS5，但上游只提供 HTTP 代理（或反之），由 puppy 做协议转换
+
+```toml
+frontend = "local_socks_proxy"
+
+[frontends.local_socks_proxy]
+type            = "socksproxy"
+listen_address  = "127.0.0.1"
+listen_port     = 1080
+backend         = "upstream_http_proxy"   # 或 "upstream_socks_proxy"
+shim            = "default_tunnel"
+
+[backends.upstream_http_proxy]
+type          = "httpproxy"
+proxy_address = "10.0.0.2:3128"
+```
+
+### 6. TUN 全局代理 → 直连
 
 puppy 创建虚拟网卡接管整机流量，按系统默认路由表直连目标。**需要 root 权限**，仅支持 macOS 与 Linux。
 
@@ -166,7 +219,7 @@ type = "direct"
 sudo bin/puppy-server --config ./config.toml
 ```
 
-### 5. TUN 全局代理 → 上游 HTTP 代理
+### 7. TUN 全局代理 → 上游 HTTP 代理
 
 整机流量经上游 HTTP 代理转发。注意：HTTP CONNECT 只能承载 TCP，UDP 会落到 `fallback`（通常配置为 `direct` 直连）。
 
@@ -202,6 +255,9 @@ type = "direct"
 | 浏览器/curl 等使用，直连目标 | `httpproxy` | `direct` |
 | 浏览器/curl 等使用，走上游 HTTP 代理 | `httpproxy` | `httpproxy` |
 | 浏览器/curl 等使用，走上游 SOCKS5 代理 | `httpproxy` | `socksproxy` |
+| 支持 SOCKS5 的应用使用，直连目标 | `socksproxy` | `direct` |
+| 支持 SOCKS5 的应用使用，走上游 HTTP 代理 | `socksproxy` | `httpproxy` |
+| 支持 SOCKS5 的应用使用，走上游 SOCKS5 代理 | `socksproxy` | `socksproxy` |
 | 整机透明代理，直连目标（含 UDP） | `tun` | `direct` |
 | 整机透明代理，走上游 HTTP 代理（仅 TCP） | `tun` | `httpproxy` + `direct` fallback |
 | 整机透明代理，走上游 SOCKS5 代理（仅 TCP） | `tun` | `socksproxy` + `direct` fallback |
@@ -239,6 +295,22 @@ frontend = "local_http_proxy"      # 必填：选择启动哪个前端组
 | `password` | 否 | Basic Auth 密码 |
 | `camouflage` | 否 | `true` 时启用伪装，未认证的普通请求返回 404，未认证的 CONNECT 返回 405 |
 | `camouflage_method` | 否 | 伪装方式，目前仅支持 `return-404`（默认） |
+| `backend` | 是 | 引用的后端组名称 |
+| `shim` | 是 | 引用的隧道组名称 |
+
+### `[frontends.<名称>]` —— `type = "socksproxy"`
+
+SOCKS5 代理前端，仅支持 CONNECT 命令（TCP）。认证方式为 RFC 1929 用户名/密码或无认证。
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `type` | 是 | 固定为 `socksproxy` |
+| `listen_address` | 是 | 监听 IP。`127.0.0.1` 仅本机；`0.0.0.0` 接受外部连接 |
+| `listen_port` | 是 | 监听端口，1–65535 |
+| `tls_cert_file` | 否 | 启用 SOCKS5-over-TLS 时填证书文件路径，需与 `tls_key_file` 同时配置 |
+| `tls_key_file` | 否 | 启用 SOCKS5-over-TLS 时填私钥文件路径 |
+| `username` | 否 | RFC 1929 用户名，必须与 `password` 同时填写或同时留空 |
+| `password` | 否 | RFC 1929 密码 |
 | `backend` | 是 | 引用的后端组名称 |
 | `shim` | 是 | 引用的隧道组名称 |
 

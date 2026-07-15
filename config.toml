@@ -9,7 +9,7 @@ frontend = "local_http_proxy"
 # local_http_proxy 是用户自定义的配置组名称。
 [frontends.local_http_proxy]
 # type 决定该配置组使用哪一种 frontend 实现。
-# 当前支持的 frontend 类型：httpproxy。
+# 当前支持的 frontend 类型：httpproxy、socksproxy、tun。
 type = "httpproxy"
 
 # listen_address 是代理服务监听的本地 IP 地址。
@@ -127,6 +127,46 @@ tls = false
 # tls_insecure_skip_verify 为 true 时跳过上游代理证书校验，仅用于测试。
 # 与 tls_ca_file 互斥。
 # tls_insecure_skip_verify = false
+
+# SOCKS5 frontend 配置（默认未启用，将上方 frontend 改为 local_socks_proxy 即可使用）。
+# SOCKS5 frontend 在本地监听一个 SOCKS5 代理端口，供支持 SOCKS5 的浏览器、CLI 或应用
+# 使用。仅支持 CONNECT 命令（TCP），认证方式为 RFC 1929 用户名/密码或无认证。
+# 可选 tls_cert_file/tls_key_file 把 SOCKS5 套在 TLS 里（SOCKS5-over-TLS，非标准），
+# 便于隐藏或加固 SOCKS5 流量；客户端需以 TLS 连接该端口后再发起 SOCKS5 握手。
+[frontends.local_socks_proxy]
+# type 决定该配置组使用哪一种 frontend 实现。
+# 当前支持的 frontend 类型：httpproxy、socksproxy、tun。
+type = "socksproxy"
+
+# listen_address 是代理服务监听的本地 IP 地址。
+# 127.0.0.1 仅允许本机访问；如需接受外部连接可改为 0.0.0.0。
+listen_address = "127.0.0.1"
+
+# listen_port 是代理服务监听的 TCP 端口，取值范围为 1 到 65535。
+listen_port = 1080
+
+# 配置 tls_cert_file 和 tls_key_file 后，frontend 将通过 TLS 接受 SOCKS5 连接。
+# 两项必须同时配置；同时省略时继续使用普通明文 SOCKS5。相对路径基于进程工作目录。
+# 可运行 scripts/generate-proxy-certs.sh 生成本地开发证书，并让客户端信任
+# certs/ca-cert.pem。使用 IP 连接时，该 IP 必须包含在服务证书的 SAN 中。
+# tls_cert_file = "./certs/proxy-cert.pem"
+# tls_key_file = "./certs/proxy-key.pem"
+
+# username 是客户端连接此 SOCKS5 代理时使用的用户名（RFC 1929 用户名/密码认证）。
+# username 和 password 必须同时填写或同时留空；同时留空表示不启用认证。
+username = "test"
+
+# password 是客户端连接此 SOCKS5 代理时使用的密码。
+password = "test12345"
+
+# backend 指定此 frontend 使用的 backend 配置组名称。
+# 本示例使用 direct_out；如需通过上游 HTTP 代理转发，可改为 upstream_http_proxy；
+# 如需通过上游 SOCKS5 代理转发，可改为 upstream_socks_proxy。
+backend = "direct_out"
+
+# shim 指定此 frontend 使用的 shim 配置组名称。
+# 该值必须与下方 [shims.<名称>] 中的一个名称完全一致。
+shim = "default_tunnel"
 
 # TUN 模式 frontend 配置（默认未启用，将上方 frontend 改为 local_tun 即可使用）。
 # TUN 模式会创建虚拟网卡接管系统默认路由，将本机全部 TCP/UDP 流量经 backend 转发。

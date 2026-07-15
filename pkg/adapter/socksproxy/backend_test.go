@@ -25,6 +25,21 @@ import (
 	"github.com/puppy/pkg/common"
 )
 
+// Local aliases over the shared SOCKS5 constants keep the test fixtures
+// readable while remaining in sync with pkg/common.
+const (
+	socks5Version                = common.SOCKS5Version
+	socks5MethodNoAuth           = common.SOCKS5MethodNoAuth
+	socks5MethodUsernamePassword = common.SOCKS5MethodUsernamePassword
+	socks5MethodNoAcceptable     = common.SOCKS5MethodNoAcceptable
+	socks5AuthVersion            = common.SOCKS5AuthVersion
+	socks5CmdConnect             = common.SOCKS5CmdConnect
+	socks5AtypIPv4               = common.SOCKS5AtypIPv4
+	socks5AtypDomain             = common.SOCKS5AtypDomain
+	socks5AtypIPv6               = common.SOCKS5AtypIPv6
+	socks5RepSuccess             = common.SOCKS5RepSuccess
+)
+
 // miniSOCKS5 starts a minimal SOCKS5 upstream proxy that accepts CONNECT
 // requests (optionally requiring username/password auth) and tunnels to the
 // requested target. It returns the proxy address and registers cleanup.
@@ -156,6 +171,8 @@ func handleMiniSOCKS5Conn(t *testing.T, conn net.Conn, requireUser, requirePass 
 }
 
 func readSOCKS5Addr(br *bufio.Reader, atyp byte) (string, error) {
+	// Reads only the DST.ADDR portion; DST.PORT is consumed separately by the
+	// mini proxy so it can format the dial target.
 	switch atyp {
 	case socks5AtypIPv4:
 		var addr [4]byte
@@ -855,14 +872,16 @@ func TestEncodeSOCKS5Request(t *testing.T) {
 	}
 }
 
-func TestSOCKS5ReplyText(t *testing.T) {
-	if socks5ReplyText(0x00) != "succeeded" {
+func TestSOCKS5ReplyText_DelegatesToCommon(t *testing.T) {
+	// The backend now reports reply text via common.SOCKS5ReplyText. Verify
+	// the shared helper still produces the strings the backend relies on.
+	if common.SOCKS5ReplyText(common.SOCKS5RepSuccess) != "succeeded" {
 		t.Fatal("rep 0x00 should be succeeded")
 	}
-	if socks5ReplyText(0x05) != "connection refused" {
+	if common.SOCKS5ReplyText(common.SOCKS5RepConnectionRefused) != "connection refused" {
 		t.Fatal("rep 0x05 should be connection refused")
 	}
-	if !strings.Contains(socks5ReplyText(0xFF), "unknown error") {
+	if !strings.Contains(common.SOCKS5ReplyText(0xFF), "unknown error") {
 		t.Fatal("rep 0xFF should be unknown error")
 	}
 }

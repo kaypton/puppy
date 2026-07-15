@@ -15,29 +15,11 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"strconv"
 
 	"github.com/puppy/pkg/common"
 )
 
-// SOCKS5 protocol constants (RFC 1928 and RFC 1929).
-const (
-	socks5Version byte = 0x05
-
-	socks5MethodNoAuth           byte = 0x00
-	socks5MethodUsernamePassword byte = 0x02
-	socks5MethodNoAcceptable     byte = 0xFF
-
-	socks5AuthVersion byte = 0x01
-
-	socks5CmdConnect byte = 0x01
-
-	socks5AtypIPv4   byte = 0x01
-	socks5AtypDomain byte = 0x03
-	socks5AtypIPv6   byte = 0x04
-
-	socks5RepSuccess byte = 0x00
-)
+// SOCKS5 protocol constants are shared from pkg/common (RFC 1928 and 1929).
 
 // BackendConfiguration configures a SOCKS5 chaining backend.
 type BackendConfiguration struct {
@@ -187,12 +169,12 @@ func (b *Backend) Dial(ctx context.Context, target common.Target, dialer common.
 // backend has credentials it offers username/password auth alongside
 // no-auth; otherwise it offers only no-auth.
 func (b *Backend) negotiateMethod(reader *bufio.Reader, conn net.Conn) error {
-	methods := []byte{socks5MethodNoAuth}
+	methods := []byte{common.SOCKS5MethodNoAuth}
 	if b.config.Username != "" {
-		methods = []byte{socks5MethodNoAuth, socks5MethodUsernamePassword}
+		methods = []byte{common.SOCKS5MethodNoAuth, common.SOCKS5MethodUsernamePassword}
 	}
 	req := make([]byte, 0, 2+len(methods))
-	req = append(req, socks5Version, byte(len(methods)))
+	req = append(req, common.SOCKS5Version, byte(len(methods)))
 	req = append(req, methods...)
 	if _, err := conn.Write(req); err != nil {
 		return fmt.Errorf("socksproxy: write method negotiation: %w", err)
@@ -202,16 +184,16 @@ func (b *Backend) negotiateMethod(reader *bufio.Reader, conn net.Conn) error {
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return fmt.Errorf("socksproxy: read method negotiation: %w", err)
 	}
-	if header[0] != socks5Version {
+	if header[0] != common.SOCKS5Version {
 		return fmt.Errorf("socksproxy: unexpected SOCKS version 0x%02x during method negotiation", header[0])
 	}
 	method := header[1]
 	switch method {
-	case socks5MethodNoAuth:
+	case common.SOCKS5MethodNoAuth:
 		return nil
-	case socks5MethodUsernamePassword:
+	case common.SOCKS5MethodUsernamePassword:
 		return b.usernamePasswordAuth(reader, conn)
-	case socks5MethodNoAcceptable:
+	case common.SOCKS5MethodNoAcceptable:
 		return errors.New("socksproxy: upstream proxy rejected connection (no acceptable method)")
 	default:
 		return fmt.Errorf("socksproxy: upstream proxy selected unsupported method 0x%02x", method)
@@ -224,7 +206,7 @@ func (b *Backend) usernamePasswordAuth(reader *bufio.Reader, conn net.Conn) erro
 		return errors.New("socksproxy: username and password must each be at most 255 bytes")
 	}
 	req := make([]byte, 0, 3+len(b.config.Username)+len(b.config.Password))
-	req = append(req, socks5AuthVersion, byte(len(b.config.Username)))
+	req = append(req, common.SOCKS5AuthVersion, byte(len(b.config.Username)))
 	req = append(req, b.config.Username...)
 	req = append(req, byte(len(b.config.Password)))
 	req = append(req, b.config.Password...)
@@ -236,7 +218,7 @@ func (b *Backend) usernamePasswordAuth(reader *bufio.Reader, conn net.Conn) erro
 	if _, err := io.ReadFull(reader, resp[:]); err != nil {
 		return fmt.Errorf("socksproxy: read username/password auth: %w", err)
 	}
-	if resp[0] != socks5AuthVersion {
+	if resp[0] != common.SOCKS5AuthVersion {
 		return fmt.Errorf("socksproxy: unexpected auth version 0x%02x", resp[0])
 	}
 	if resp[1] != 0x00 {
@@ -260,41 +242,16 @@ func socks5Connect(reader *bufio.Reader, conn net.Conn, target common.Target) er
 	if _, err := io.ReadFull(reader, header[:]); err != nil {
 		return fmt.Errorf("socksproxy: read CONNECT response: %w", err)
 	}
-	if header[0] != socks5Version {
+	if header[0] != common.SOCKS5Version {
 		return fmt.Errorf("socksproxy: unexpected SOCKS version 0x%02x in CONNECT response", header[0])
 	}
-	if header[1] != socks5RepSuccess {
-		return fmt.Errorf("socksproxy: upstream proxy returned %s", socks5ReplyText(header[1]))
+	if header[1] != common.SOCKS5RepSuccess {
+		return fmt.Errorf("socksproxy: upstream proxy returned %s", common.SOCKS5ReplyText(header[1]))
 	}
 
-	// Skip BND.ADDR based on the address type.
-	switch header[3] {
-	case socks5AtypIPv4:
-		var addr [4]byte
-		if _, err := io.ReadFull(reader, addr[:]); err != nil {
-			return fmt.Errorf("socksproxy: read CONNECT bind address: %w", err)
-		}
-	case socks5AtypIPv6:
-		var addr [16]byte
-		if _, err := io.ReadFull(reader, addr[:]); err != nil {
-			return fmt.Errorf("socksproxy: read CONNECT bind address: %w", err)
-		}
-	case socks5AtypDomain:
-		var lenByte [1]byte
-		if _, err := io.ReadFull(reader, lenByte[:]); err != nil {
-			return fmt.Errorf("socksproxy: read CONNECT bind address length: %w", err)
-		}
-		domain := make([]byte, lenByte[0])
-		if _, err := io.ReadFull(reader, domain); err != nil {
-			return fmt.Errorf("socksproxy: read CONNECT bind address: %w", err)
-		}
-	default:
-		return fmt.Errorf("socksproxy: unknown address type 0x%02x in CONNECT response", header[3])
-	}
-
-	var port [2]byte
-	if _, err := io.ReadFull(reader, port[:]); err != nil {
-		return fmt.Errorf("socksproxy: read CONNECT bind port: %w", err)
+	// Skip BND.ADDR + BND.PORT using the shared address reader.
+	if _, _, err := common.ReadSOCKS5Address(reader, header[3]); err != nil {
+		return fmt.Errorf("socksproxy: read CONNECT bind address: %w", err)
 	}
 	return nil
 }
@@ -310,52 +267,26 @@ func encodeSOCKS5Request(target common.Target) ([]byte, error) {
 		return nil, errors.New("socksproxy: target port is required")
 	}
 
-	req := []byte{socks5Version, socks5CmdConnect, 0x00}
+	req := []byte{common.SOCKS5Version, common.SOCKS5CmdConnect, 0x00}
 	if ip := net.ParseIP(host); ip != nil {
 		if v4 := ip.To4(); v4 != nil {
-			req = append(req, socks5AtypIPv4)
+			req = append(req, common.SOCKS5AtypIPv4)
 			req = append(req, v4...)
 		} else {
-			req = append(req, socks5AtypIPv6)
+			req = append(req, common.SOCKS5AtypIPv6)
 			req = append(req, ip.To16()...)
 		}
 	} else {
 		if len(host) > 255 {
 			return nil, fmt.Errorf("socksproxy: target domain %q exceeds 255 bytes", host)
 		}
-		req = append(req, socks5AtypDomain, byte(len(host)))
+		req = append(req, common.SOCKS5AtypDomain, byte(len(host)))
 		req = append(req, host...)
 	}
 	var portBytes [2]byte
 	binary.BigEndian.PutUint16(portBytes[:], port)
 	req = append(req, portBytes[:]...)
 	return req, nil
-}
-
-// socks5ReplyText maps a SOCKS5 reply code to a human-readable description.
-func socks5ReplyText(rep byte) string {
-	switch rep {
-	case 0x00:
-		return "succeeded"
-	case 0x01:
-		return "general SOCKS server failure"
-	case 0x02:
-		return "connection not allowed by ruleset"
-	case 0x03:
-		return "network unreachable"
-	case 0x04:
-		return "host unreachable"
-	case 0x05:
-		return "connection refused"
-	case 0x06:
-		return "TTL expired"
-	case 0x07:
-		return "command not supported"
-	case 0x08:
-		return "address type not supported"
-	default:
-		return "unknown error (0x" + strconv.FormatUint(uint64(rep), 16) + ")"
-	}
 }
 
 // bufferedConn preserves bytes that bufio.Reader pulled past the SOCKS5
