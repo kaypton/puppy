@@ -66,8 +66,20 @@ func (r *linuxRouteManager) currentDefault() (gateway, iface string, err error) 
 	if err != nil {
 		return "", "", err
 	}
-	fields := strings.Fields(strings.TrimSpace(string(out)))
-	// Expected: "default via <gw> dev <iface> ..."
+	return parseDefaultRoute(string(out))
+}
+
+// parseDefaultRoute parses the output of `ip route show default` and returns
+// the gateway and interface. It expects a line containing "via <gateway>" and
+// "dev <interface>".
+func parseDefaultRoute(output string) (gateway, iface string, err error) {
+	// Use only the first line; multiple default routes are rare and the first
+	// is sufficient for the common case.
+	line := output
+	if idx := strings.IndexByte(output, '\n'); idx != -1 {
+		line = output[:idx]
+	}
+	fields := strings.Fields(strings.TrimSpace(line))
 	for i := 0; i+1 < len(fields); i++ {
 		switch fields[i] {
 		case "via":

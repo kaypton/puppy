@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Go 1.24 HTTP CONNECT proxy. The executable entry point and Cobra/TOML configuration assembly live in `cmd/puppy-server/`. Reusable code is under `pkg/`: `httpproxy` provides the inbound frontend, `adapter/direct` and `adapter/httpproxy` provide outbound backends, `common` defines shared interfaces, and `shim` copies traffic between connections. Tests live beside their implementation as `*_test.go`. `config.toml` documents every supported option. Dependencies are committed under `vendor/`; generated binaries belong in `bin/` and must not be committed.
+This is a Go 1.24.13 HTTP CONNECT proxy. The executable entry point and Cobra/TOML configuration assembly live in `cmd/puppy-server/`. Reusable code is under `pkg/`: `httpproxy` provides the inbound frontend, `adapter/direct` and `adapter/httpproxy` provide outbound backends, `common` defines shared interfaces, and `shim` copies traffic between connections. Tests live beside their implementation as `*_test.go`. `config.toml` documents every supported option. Dependencies are committed under `vendor/`; generated binaries belong in `bin/` and must not be committed.
 
 Each implementation owns its configuration. Add a `Type` constant, `Configuration` struct, and `Validate` method in the implementation package, then register its decoding and construction in `cmd/puppy-server/main.go`.
 
