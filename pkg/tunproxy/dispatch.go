@@ -2,6 +2,8 @@ package tunproxy
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"io"
 	"log/slog"
 	"sync"
@@ -13,6 +15,11 @@ import (
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/udp"
 )
 
+const (
+	dnsPort           uint16 = 53
+	maxDNSMessageSize        = 1<<16 - 1
+)
+
 // dispatcher implements sessionHandler. It accepts TCP/UDP sessions from the
 // netstack and forwards them to a common.Backend.
 type dispatcher struct {
@@ -20,6 +27,7 @@ type dispatcher struct {
 	backends       []common.Backend
 	fallback       common.Backend
 	dialer         common.Dialer
+	dns            *common.Target
 	shimBuf        int
 	udpIdle        time.Duration
 	detectTimeout  time.Duration
@@ -31,12 +39,13 @@ type dispatcher struct {
 
 // newDispatcher creates a dispatcher bound to the given context. Run must be
 // cancelled to release in-flight sessions.
-func newDispatcher(ctx context.Context, ns *networkStack, backends []common.Backend, fallback common.Backend, dialer common.Dialer, shimBuf int, udpIdle, detectTimeout time.Duration, detectMaxBytes int, logger *slog.Logger) *dispatcher {
+func newDispatcher(ctx context.Context, ns *networkStack, backends []common.Backend, fallback common.Backend, dialer common.Dialer, dns *common.Target, shimBuf int, udpIdle, detectTimeout time.Duration, detectMaxBytes int, logger *slog.Logger) *dispatcher {
 	return &dispatcher{
 		ns:             ns,
 		backends:       backends,
 		fallback:       fallback,
 		dialer:         dialer,
+		dns:            dns,
 		shimBuf:        shimBuf,
 		udpIdle:        udpIdle,
 		detectTimeout:  detectTimeout,
@@ -61,6 +70,8 @@ func (d *dispatcher) HandleTCP(req *tcp.ForwarderRequest) {
 }
 
 func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
+	originalTarget := target
+	target, dnsRedirect := d.redirectDNS(target)
 	frontend, err := d.ns.endpointFromTCPRequest(req)
 	if err != nil {
 		d.logger.Info("tunproxy: tcp endpoint creation failed", "target", target.Address(), "err", err)
@@ -68,8 +79,15 @@ func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
 		return
 	}
 	var frontendConn io.ReadWriteCloser = frontend
-	backend, backendIndex, fallback := d.selectTCPBackend(target)
-	if backendIndex >= 0 && !common.SupportsAnyProtocol(backend.Capabilities(), "tcp") {
+	var backend common.Backend
+	var backendIndex int
+	var fallback bool
+	if dnsRedirect {
+		backend, backendIndex, fallback = d.selectBackend(target)
+	} else {
+		backend, backendIndex, fallback = d.selectTCPBackend(target)
+	}
+	if !dnsRedirect && backendIndex >= 0 && !common.SupportsAnyProtocol(backend.Capabilities(), "tcp") {
 		target.Protocol, frontendConn, err = detectProtocol(d.ctx, frontend, d.detectTimeout, d.detectMaxBytes)
 		if err != nil {
 			d.logger.Info("tunproxy: tcp protocol detection failed", "target", target.Address(), "err", err)
@@ -77,10 +95,10 @@ func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
 			return
 		}
 		backend, backendIndex, fallback = d.selectBackend(target)
-	} else {
+	} else if !dnsRedirect {
 		target.Protocol = common.ProtocolUnknown
 	}
-	d.logger.Info("tunproxy: tcp route selected", "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback)
+	d.logger.Info("tunproxy: tcp route selected", "original_target", originalTarget.Address(), "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback)
 
 	upstream, err := backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
@@ -130,6 +148,10 @@ func (d *dispatcher) HandleUDP(req *udp.ForwarderRequest) {
 
 func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target) {
 	defer frontend.Close()
+	if dnsTarget, ok := d.redirectDNS(target); ok {
+		d.serveUDPDNS(frontend, target, dnsTarget)
+		return
+	}
 	target.Protocol = common.ProtocolUnknown
 	backend, backendIndex, fallback := d.selectBackend(target)
 	d.logger.Info("tunproxy: udp route selected", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback)
@@ -142,37 +164,10 @@ func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target)
 
 	d.logger.Info("tunproxy: udp tunnel established", "target", target.Address())
 
-	// UDP has no close signal, so a watchdog closes both sides after udpIdle
-	// of inactivity to interrupt the blocking reads below.
 	idleReset := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	defer close(stop)
-	go func() {
-		timer := time.NewTimer(d.udpIdle)
-		for {
-			select {
-			case <-d.ctx.Done():
-				_ = frontend.Close()
-				_ = upstream.Close()
-				return
-			case <-stop:
-				timer.Stop()
-				return
-			case <-idleReset:
-				if !timer.Stop() {
-					select {
-					case <-timer.C:
-					default:
-					}
-				}
-				timer.Reset(d.udpIdle)
-			case <-timer.C:
-				_ = frontend.Close()
-				_ = upstream.Close()
-				return
-			}
-		}
-	}()
+	go d.watchUDPIdle(frontend, upstream, idleReset, stop)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
@@ -187,6 +182,78 @@ func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target)
 		_ = frontend.Close()
 	}()
 	wg.Wait()
+}
+
+// serveUDPDNS converts each intercepted UDP DNS datagram to the two-byte
+// length-prefixed DNS-over-TCP format expected by the backend connection. The
+// TCP connection is reused for the lifetime of the UDP flow.
+func (d *dispatcher) serveUDPDNS(frontend io.ReadWriteCloser, originalTarget, target common.Target) {
+	backend, backendIndex, fallback := d.selectBackend(target)
+	d.logger.Info("tunproxy: udp dns route selected", "original_target", originalTarget.Address(), "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback)
+	upstream, err := backend.Dial(d.ctx, target, d.dialer)
+	if err != nil {
+		d.logger.Info("tunproxy: udp dns backend dial failed", "original_target", originalTarget.Address(), "target", target.Address(), "backend_index", backendIndex, "fallback", fallback, "err", err)
+		return
+	}
+	defer upstream.Close()
+
+	d.logger.Info("tunproxy: udp dns tunnel established", "original_target", originalTarget.Address(), "target", target.Address())
+	idleReset := make(chan struct{}, 1)
+	stop := make(chan struct{})
+	defer close(stop)
+	go d.watchUDPIdle(frontend, upstream, idleReset, stop)
+
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_ = pipeUDPToDNSStream(upstream, frontend, idleReset)
+		_ = upstream.Close()
+	}()
+	go func() {
+		defer wg.Done()
+		_ = pipeDNSStreamToUDP(frontend, upstream, idleReset)
+		_ = frontend.Close()
+	}()
+	wg.Wait()
+}
+
+// redirectDNS replaces a destination-port-53 target with the configured
+// fixed DNS-over-TCP resolver.
+func (d *dispatcher) redirectDNS(target common.Target) (common.Target, bool) {
+	if d.dns == nil || target.Port != dnsPort {
+		return target, false
+	}
+	return *d.dns, true
+}
+
+// watchUDPIdle closes both sides of a UDP relay after inactivity or context
+// cancellation, interrupting any blocked reads.
+func (d *dispatcher) watchUDPIdle(frontend, upstream io.Closer, idleReset <-chan struct{}, stop <-chan struct{}) {
+	timer := time.NewTimer(d.udpIdle)
+	defer timer.Stop()
+	for {
+		select {
+		case <-d.ctx.Done():
+			_ = frontend.Close()
+			_ = upstream.Close()
+			return
+		case <-stop:
+			return
+		case <-idleReset:
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(d.udpIdle)
+		case <-timer.C:
+			_ = frontend.Close()
+			_ = upstream.Close()
+			return
+		}
+	}
 }
 
 func (d *dispatcher) selectTCPBackend(target common.Target) (common.Backend, int, bool) {
@@ -223,6 +290,77 @@ func pipeUDP(dst io.Writer, src io.Reader, idleReset chan<- struct{}) {
 		case idleReset <- struct{}{}:
 		default:
 		}
+	}
+}
+
+// pipeUDPToDNSStream frames UDP datagrams for a DNS-over-TCP stream.
+func pipeUDPToDNSStream(dst io.Writer, src io.Reader, idleReset chan<- struct{}) error {
+	buf := make([]byte, maxDNSMessageSize)
+	for {
+		n, err := src.Read(buf)
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return errors.New("empty UDP DNS message")
+		}
+		frame := make([]byte, 2+n)
+		binary.BigEndian.PutUint16(frame, uint16(n))
+		copy(frame[2:], buf[:n])
+		if err := writeFull(dst, frame); err != nil {
+			return err
+		}
+		signalIdle(idleReset)
+	}
+}
+
+// pipeDNSStreamToUDP removes DNS-over-TCP framing and writes each message as
+// one UDP datagram.
+func pipeDNSStreamToUDP(dst io.Writer, src io.Reader, idleReset chan<- struct{}) error {
+	var length [2]byte
+	for {
+		if _, err := io.ReadFull(src, length[:]); err != nil {
+			return err
+		}
+		n := int(binary.BigEndian.Uint16(length[:]))
+		if n == 0 {
+			return errors.New("empty TCP DNS message")
+		}
+		message := make([]byte, n)
+		if _, err := io.ReadFull(src, message); err != nil {
+			return err
+		}
+		written, err := dst.Write(message)
+		if err != nil {
+			return err
+		}
+		if written != len(message) {
+			return io.ErrShortWrite
+		}
+		signalIdle(idleReset)
+	}
+}
+
+func writeFull(dst io.Writer, data []byte) error {
+	for len(data) > 0 {
+		n, err := dst.Write(data)
+		if n > 0 {
+			data = data[n:]
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrNoProgress
+		}
+	}
+	return nil
+}
+
+func signalIdle(idleReset chan<- struct{}) {
+	select {
+	case idleReset <- struct{}{}:
+	default:
 	}
 }
 

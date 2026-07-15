@@ -1,10 +1,14 @@
 package tunproxy
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -29,10 +33,23 @@ type capabilityBackend struct {
 	capabilities []common.Capability
 }
 
+type dialBackend struct {
+	capabilities []common.Capability
+	conn         io.ReadWriteCloser
+	targets      chan common.Target
+}
+
 func (b *capabilityBackend) Capabilities() []common.Capability { return b.capabilities }
 
 func (b *capabilityBackend) Dial(context.Context, common.Target, common.Dialer) (io.ReadWriteCloser, error) {
 	return nil, errors.New("not used")
+}
+
+func (b *dialBackend) Capabilities() []common.Capability { return b.capabilities }
+
+func (b *dialBackend) Dial(_ context.Context, target common.Target, _ common.Dialer) (io.ReadWriteCloser, error) {
+	b.targets <- target
+	return b.conn, nil
 }
 
 func newBlockingBackend() *blockingBackend {
@@ -70,7 +87,7 @@ func TestDispatcher_HandleUDPRegistersFlowBeforeBackendDial(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	backend := newBlockingBackend()
 	dispatcher := newDispatcher(
-		ctx, ns, []common.Backend{backend}, commonFallback(), nil, 0, time.Second, time.Second, defaultProtocolDetectMaxBytes,
+		ctx, ns, []common.Backend{backend}, commonFallback(), nil, nil, 0, time.Second, time.Second, defaultProtocolDetectMaxBytes,
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 	)
 	ns.handler = dispatcher
@@ -143,6 +160,269 @@ func TestDispatcher_SelectBackendByPriorityAndProtocol(t *testing.T) {
 	if got != httpBackend || index != 0 || usedFallback {
 		t.Fatalf("selectTCPBackend() = (%T, %d, %t), want first restricted backend", got, index, usedFallback)
 	}
+}
+
+func TestDispatcher_RedirectDNS(t *testing.T) {
+	dns := common.Target{Network: "tcp", Protocol: common.ProtocolDNS, Host: "1.1.1.1", Port: 5353}
+	dispatcher := &dispatcher{dns: &dns}
+
+	redirected, ok := dispatcher.redirectDNS(common.Target{Network: "udp", Host: "192.0.2.53", Port: 53})
+	if !ok || redirected != dns {
+		t.Fatalf("redirectDNS() = (%#v, %t), want (%#v, true)", redirected, ok, dns)
+	}
+
+	original := common.Target{Network: "udp", Host: "192.0.2.53", Port: 5353}
+	redirected, ok = dispatcher.redirectDNS(original)
+	if ok || redirected != original {
+		t.Fatalf("non-DNS redirectDNS() = (%#v, %t), want (%#v, false)", redirected, ok, original)
+	}
+
+	dispatcher.dns = nil
+	original.Port = 53
+	redirected, ok = dispatcher.redirectDNS(original)
+	if ok || redirected != original {
+		t.Fatalf("disabled redirectDNS() = (%#v, %t), want (%#v, false)", redirected, ok, original)
+	}
+}
+
+func TestDispatcher_ServeUDPDNSFramesAndRoutesTCP(t *testing.T) {
+	frontend, client := net.Pipe()
+	upstream, resolver := net.Pipe()
+	t.Cleanup(func() {
+		_ = client.Close()
+		_ = resolver.Close()
+	})
+
+	dnsTarget := common.Target{Network: "tcp", Protocol: common.ProtocolDNS, Host: "1.1.1.1", Port: 53}
+	backend := &dialBackend{
+		capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolDNS}},
+		conn:         upstream,
+		targets:      make(chan common.Target, 1),
+	}
+	dispatcher := &dispatcher{
+		backends: []common.Backend{backend},
+		fallback: commonFallback(),
+		ctx:      context.Background(),
+		udpIdle:  time.Second,
+		logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+	done := make(chan struct{})
+	go func() {
+		dispatcher.serveUDPDNS(frontend, common.Target{Network: "udp", Host: "192.0.2.53", Port: 53}, dnsTarget)
+		close(done)
+	}()
+
+	select {
+	case got := <-backend.targets:
+		if got != dnsTarget {
+			t.Fatalf("backend target = %#v, want %#v", got, dnsTarget)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backend was not dialed")
+	}
+
+	query := []byte{0x12, 0x34, 0x01, 0x00}
+	writeDone := make(chan error, 1)
+	go func() {
+		_, err := client.Write(query)
+		writeDone <- err
+	}()
+	framedQuery := make([]byte, len(query)+2)
+	if _, err := io.ReadFull(resolver, framedQuery); err != nil {
+		t.Fatalf("read framed query: %v", err)
+	}
+	if got := binary.BigEndian.Uint16(framedQuery[:2]); got != uint16(len(query)) || !bytes.Equal(framedQuery[2:], query) {
+		t.Fatalf("framed query = %x", framedQuery)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatalf("write query: %v", err)
+	}
+
+	response := []byte{0x12, 0x34, 0x81, 0x80}
+	framedResponse := make([]byte, len(response)+2)
+	binary.BigEndian.PutUint16(framedResponse, uint16(len(response)))
+	copy(framedResponse[2:], response)
+	go func() { _, _ = resolver.Write(framedResponse) }()
+	gotResponse := make([]byte, len(response))
+	if _, err := io.ReadFull(client, gotResponse); err != nil {
+		t.Fatalf("read UDP response: %v", err)
+	}
+	if !bytes.Equal(gotResponse, response) {
+		t.Fatalf("response = %x, want %x", gotResponse, response)
+	}
+
+	_ = client.Close()
+	_ = resolver.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("UDP DNS relay did not stop")
+	}
+}
+
+type datagramReader struct {
+	messages [][]byte
+	index    int
+}
+
+func (r *datagramReader) Read(p []byte) (int, error) {
+	if r.index == len(r.messages) {
+		return 0, io.EOF
+	}
+	message := r.messages[r.index]
+	r.index++
+	return copy(p, message), nil
+}
+
+type datagramWriter struct {
+	messages [][]byte
+	short    bool
+}
+
+type limitedWriter struct {
+	bytes.Buffer
+	max int
+}
+
+func (w *limitedWriter) Write(p []byte) (int, error) {
+	if len(p) > w.max {
+		p = p[:w.max]
+	}
+	return w.Buffer.Write(p)
+}
+
+type closeRecorder struct {
+	once   sync.Once
+	closed chan struct{}
+}
+
+func newCloseRecorder() *closeRecorder {
+	return &closeRecorder{closed: make(chan struct{})}
+}
+
+func (r *closeRecorder) Close() error {
+	r.once.Do(func() { close(r.closed) })
+	return nil
+}
+
+func (w *datagramWriter) Write(p []byte) (int, error) {
+	message := append([]byte(nil), p...)
+	w.messages = append(w.messages, message)
+	if w.short {
+		return len(p) - 1, nil
+	}
+	return len(p), nil
+}
+
+type oneByteReader struct{ io.Reader }
+
+func (r oneByteReader) Read(p []byte) (int, error) {
+	if len(p) > 1 {
+		p = p[:1]
+	}
+	return r.Reader.Read(p)
+}
+
+func TestDNSStreamConversion(t *testing.T) {
+	queries := [][]byte{{0x00, 0x01, 0x01}, {0x00, 0x02, 0x02, 0x03}}
+	stream := &limitedWriter{max: 1}
+	err := pipeUDPToDNSStream(stream, &datagramReader{messages: queries}, make(chan struct{}, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("pipeUDPToDNSStream error = %v, want EOF", err)
+	}
+	var wantStream bytes.Buffer
+	for _, query := range queries {
+		_ = binary.Write(&wantStream, binary.BigEndian, uint16(len(query)))
+		_, _ = wantStream.Write(query)
+	}
+	if !bytes.Equal(stream.Bytes(), wantStream.Bytes()) {
+		t.Fatalf("stream = %x, want %x", stream.Bytes(), wantStream.Bytes())
+	}
+
+	writer := &datagramWriter{}
+	err = pipeDNSStreamToUDP(writer, oneByteReader{Reader: bytes.NewReader(stream.Bytes())}, make(chan struct{}, 1))
+	if !errors.Is(err, io.EOF) {
+		t.Fatalf("pipeDNSStreamToUDP error = %v, want EOF", err)
+	}
+	if len(writer.messages) != len(queries) {
+		t.Fatalf("messages = %d, want %d", len(writer.messages), len(queries))
+	}
+	for i := range queries {
+		if !bytes.Equal(writer.messages[i], queries[i]) {
+			t.Fatalf("message %d = %x, want %x", i, writer.messages[i], queries[i])
+		}
+	}
+}
+
+func TestDispatcher_WatchUDPIdleClosesBothSides(t *testing.T) {
+	tests := []struct {
+		name    string
+		idle    time.Duration
+		trigger func(context.CancelFunc)
+	}{
+		{
+			name: "idle timeout",
+			idle: 10 * time.Millisecond,
+			trigger: func(context.CancelFunc) {
+				time.Sleep(20 * time.Millisecond)
+			},
+		},
+		{
+			name: "context cancellation",
+			idle: time.Hour,
+			trigger: func(cancel context.CancelFunc) {
+				cancel()
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			frontend := newCloseRecorder()
+			upstream := newCloseRecorder()
+			dispatcher := &dispatcher{ctx: ctx, udpIdle: test.idle}
+			stop := make(chan struct{})
+			go dispatcher.watchUDPIdle(frontend, upstream, make(chan struct{}), stop)
+
+			test.trigger(cancel)
+			for name, closed := range map[string]<-chan struct{}{"frontend": frontend.closed, "upstream": upstream.closed} {
+				select {
+				case <-closed:
+				case <-time.After(time.Second):
+					t.Fatalf("%s was not closed", name)
+				}
+			}
+			close(stop)
+		})
+	}
+}
+
+func TestDNSStreamConversionRejectsMalformedFrames(t *testing.T) {
+	t.Run("empty UDP message", func(t *testing.T) {
+		err := pipeUDPToDNSStream(io.Discard, &datagramReader{messages: [][]byte{{}}}, make(chan struct{}, 1))
+		if err == nil || !strings.Contains(err.Error(), "empty UDP") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("empty TCP frame", func(t *testing.T) {
+		err := pipeDNSStreamToUDP(io.Discard, bytes.NewReader([]byte{0, 0}), make(chan struct{}, 1))
+		if err == nil || !strings.Contains(err.Error(), "empty TCP") {
+			t.Fatalf("error = %v", err)
+		}
+	})
+	t.Run("truncated TCP frame", func(t *testing.T) {
+		err := pipeDNSStreamToUDP(io.Discard, bytes.NewReader([]byte{0, 3, 1}), make(chan struct{}, 1))
+		if !errors.Is(err, io.ErrUnexpectedEOF) {
+			t.Fatalf("error = %v, want unexpected EOF", err)
+		}
+	})
+	t.Run("short UDP write", func(t *testing.T) {
+		err := pipeDNSStreamToUDP(&datagramWriter{short: true}, bytes.NewReader([]byte{0, 1, 1}), make(chan struct{}, 1))
+		if !errors.Is(err, io.ErrShortWrite) {
+			t.Fatalf("error = %v, want short write", err)
+		}
+	})
 }
 
 func commonFallback() common.Backend { return direct.NewBackend() }

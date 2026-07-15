@@ -5,6 +5,7 @@ import "testing"
 func TestCapabilities(t *testing.T) {
 	capabilities := []Capability{
 		{Network: "tcp", Protocol: ProtocolHTTP},
+		{Network: "tcp", Protocol: ProtocolDNS},
 		{Network: "udp", Protocol: ProtocolAny},
 	}
 
@@ -19,6 +20,9 @@ func TestCapabilities(t *testing.T) {
 	}
 	if Supports(capabilities, Target{Network: "tcp", Protocol: ProtocolTLS}) {
 		t.Fatal("TLS over TCP should not be supported")
+	}
+	if !Supports(capabilities, Target{Network: "tcp", Protocol: ProtocolDNS}) {
+		t.Fatal("DNS over TCP should be supported")
 	}
 	if !Supports(capabilities, Target{Network: "udp", Protocol: ProtocolTLS}) {
 		t.Fatal("UDP wildcard should support TLS marker")

@@ -19,6 +19,7 @@ type ServerConfiguration struct {
 	MTU                    uint32
 	AutoRoute              bool
 	UDPIdleTimeout         time.Duration
+	DNSServer              string
 	Backends               []common.Backend
 	Fallback               common.Backend
 	ProtocolDetectTimeout  time.Duration
@@ -33,6 +34,7 @@ type ServerConfiguration struct {
 type Server struct {
 	config ServerConfiguration
 	logger *slog.Logger
+	dns    *common.Target
 }
 
 // NewServer validates the configuration and returns a ready-to-run server.
@@ -42,6 +44,10 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	}
 	if len(config.Backends) == 0 {
 		return nil, errors.New("tunproxy: at least one backend is required")
+	}
+	dns, err := parseDNSServer(config.DNSServer)
+	if err != nil {
+		return nil, fmt.Errorf("tunproxy: %w", err)
 	}
 	for _, backend := range config.Backends {
 		if backend == nil {
@@ -69,7 +75,7 @@ func NewServer(config ServerConfiguration) (*Server, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Server{config: config, logger: logger}, nil
+	return &Server{config: config, logger: logger, dns: dns}, nil
 }
 
 // Run opens the TUN device, configures routing, and serves until ctx is
@@ -115,7 +121,7 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("tunproxy: configure host network: %w", err)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	dispatcher := newDispatcher(runCtx, ns, s.config.Backends, s.config.Fallback, dialer, s.config.ShimBufferSize, s.config.UDPIdleTimeout, s.config.ProtocolDetectTimeout, s.config.ProtocolDetectMaxBytes, s.logger)
+	dispatcher := newDispatcher(runCtx, ns, s.config.Backends, s.config.Fallback, dialer, s.dns, s.config.ShimBufferSize, s.config.UDPIdleTimeout, s.config.ProtocolDetectTimeout, s.config.ProtocolDetectMaxBytes, s.logger)
 	ns.handler = dispatcher
 	defer func() {
 		// Restore host routing before waiting for sessions. In particular, UDP

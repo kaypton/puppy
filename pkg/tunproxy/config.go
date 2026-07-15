@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -42,6 +43,10 @@ type Configuration struct {
 	// UDPIdleTimeout closes idle UDP sessions after this duration. Zero or
 	// negative uses the 30s default.
 	UDPIdleTimeout int `toml:"udp_idle_timeout"`
+	// DNSServer optionally redirects destination-port-53 TCP and UDP DNS
+	// traffic to a fixed IP address and port. UDP DNS is carried to the backend
+	// as DNS over TCP.
+	DNSServer string `toml:"dns_server"`
 	// Backend is the legacy single-backend form. It is mutually exclusive with
 	// Backends.
 	Backend string `toml:"backend"`
@@ -68,6 +73,9 @@ func (c Configuration) Validate() error {
 	}
 	if c.MTU < 0 {
 		return errors.New("mtu must not be negative")
+	}
+	if _, err := parseDNSServer(c.DNSServer); err != nil {
+		return err
 	}
 	if c.Backend != "" && len(c.Backends) > 0 {
 		return errors.New("backend and backends are mutually exclusive")
@@ -148,6 +156,7 @@ func (c Configuration) ServerConfig(backends []common.Backend, fallback common.B
 		MTU:                    mtu,
 		AutoRoute:              autoRoute,
 		UDPIdleTimeout:         udpIdle,
+		DNSServer:              c.DNSServer,
 		Backends:               backends,
 		Fallback:               fallback,
 		ProtocolDetectTimeout:  detectTimeout,
@@ -171,7 +180,31 @@ func (c Configuration) BackendReferences() []string {
 // String aids log output; trims to key fields.
 func (c Configuration) String() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "tun{device=%q ipv4=%q ipv6=%q mtu=%d backends=%q fallback=%q shim=%q}",
-		c.DeviceName, c.IPv4Address, c.IPv6Address, c.MTU, c.BackendReferences(), c.Fallback, c.Shim)
+	fmt.Fprintf(&b, "tun{device=%q ipv4=%q ipv6=%q mtu=%d dns_server=%q backends=%q fallback=%q shim=%q}",
+		c.DeviceName, c.IPv4Address, c.IPv6Address, c.MTU, c.DNSServer, c.BackendReferences(), c.Fallback, c.Shim)
 	return b.String()
+}
+
+// parseDNSServer validates a fixed resolver and converts it to a backend
+// target. An empty value disables DNS interception.
+func parseDNSServer(value string) (*common.Target, error) {
+	if value == "" {
+		return nil, nil
+	}
+	addr, err := netip.ParseAddrPort(value)
+	if err != nil {
+		return nil, fmt.Errorf("dns_server must be an IP address with port: %w", err)
+	}
+	if addr.Addr().Zone() != "" {
+		return nil, errors.New("dns_server must not contain an IPv6 zone")
+	}
+	if addr.Port() == 0 {
+		return nil, errors.New("dns_server port must not be zero")
+	}
+	return &common.Target{
+		Network:  "tcp",
+		Protocol: common.ProtocolDNS,
+		Host:     addr.Addr().String(),
+		Port:     addr.Port(),
+	}, nil
 }

@@ -35,6 +35,8 @@ const (
 	ProtocolHTTP Protocol = "http"
 	// ProtocolTLS identifies a TLS client handshake.
 	ProtocolTLS Protocol = "tls"
+	// ProtocolDNS identifies DNS carried over TCP.
+	ProtocolDNS Protocol = "dns"
 )
 
 // Capability describes one network/application-protocol combination accepted

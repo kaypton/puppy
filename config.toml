@@ -128,6 +128,13 @@ auto_route = true
 # 省略或 <=0 时使用默认值 30 秒。
 udp_idle_timeout = 30
 
+# dns_server 可选，格式为带端口的 IPv4/IPv6 字面量。配置后，目的端口为 53
+# 的 TCP/UDP DNS 流量会重定向到该解析器；UDP 查询会转换为 DNS-over-TCP，
+# 因而也可通过只支持 TCP 的 HTTP CONNECT backend 转发。留空或省略时保持
+# 原有转发行为。为避免 DNS 引导递归，此处不接受主机名。
+# dns_server = "1.1.1.1:53"
+# dns_server = "[2606:4700:4700::1111]:53"
+
 # backends 按优先级指定候选 backend。本例保持直接转发；如需让 TCP 通过
 # 上游 HTTP CONNECT proxy，可改为 ["upstream_http_proxy"]，不支持的 UDP
 # 会继续交给下方 fallback。拨号失败不会触发 fallback。

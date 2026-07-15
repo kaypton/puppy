@@ -42,6 +42,7 @@ type = "tun"
 ipv4_address = "10.0.0.1/24"
 mtu = 1500
 auto_route = false
+dns_server = "1.1.1.1:53"
 backend = "direct_out"
 shim = "default_tunnel"
 
@@ -116,6 +117,9 @@ func TestLoadConfiguration(t *testing.T) {
 	}
 	if tun.AutoRoute == nil || *tun.AutoRoute != false {
 		t.Fatalf("tun auto_route = %v, want false", tun.AutoRoute)
+	}
+	if tun.DNSServer != "1.1.1.1:53" {
+		t.Fatalf("tun dns_server = %q, want 1.1.1.1:53", tun.DNSServer)
 	}
 }
 

@@ -28,7 +28,9 @@ func TestNewServer_Validation(t *testing.T) {
 		{"IPv4 field contains IPv6", ServerConfiguration{IPv4Address: "fd00::1/64", Backends: []common.Backend{backend}, Fallback: fallback, Logger: logger}, "ipv4_address must contain an IPv4 address"},
 		{"missing backend", ServerConfiguration{IPv4Address: "10.0.0.1/24", Fallback: fallback, Logger: logger}, "at least one backend is required"},
 		{"fallback not catch all", ServerConfiguration{IPv4Address: "10.0.0.1/24", Backends: []common.Backend{backend}, Fallback: errorBackend{}, Logger: logger}, "fallback must support udp"},
+		{"invalid DNS server", ServerConfiguration{IPv4Address: "10.0.0.1/24", DNSServer: "resolver.example:53", Backends: []common.Backend{backend}, Fallback: fallback, Logger: logger}, "dns_server must be an IP address with port"},
 		{"valid", ServerConfiguration{IPv4Address: "10.0.0.1/24", Backends: []common.Backend{backend}, Fallback: fallback, Logger: logger}, ""},
+		{"valid DNS server", ServerConfiguration{IPv4Address: "10.0.0.1/24", DNSServer: "1.1.1.1:53", Backends: []common.Backend{backend}, Fallback: fallback, Logger: logger}, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

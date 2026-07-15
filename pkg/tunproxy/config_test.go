@@ -65,6 +65,36 @@ func TestConfiguration_Validate(t *testing.T) {
 			wantErr: "mtu must not be negative",
 		},
 		{
+			name: "dns server hostname",
+			cfg: Configuration{
+				IPv4Address: "10.0.0.1/24",
+				DNSServer:   "resolver.example:53",
+				Backend:     "b",
+				Shim:        "s",
+			},
+			wantErr: "dns_server must be an IP address with port",
+		},
+		{
+			name: "dns server missing port",
+			cfg: Configuration{
+				IPv4Address: "10.0.0.1/24",
+				DNSServer:   "1.1.1.1",
+				Backend:     "b",
+				Shim:        "s",
+			},
+			wantErr: "dns_server must be an IP address with port",
+		},
+		{
+			name: "dns server zero port",
+			cfg: Configuration{
+				IPv4Address: "10.0.0.1/24",
+				DNSServer:   "1.1.1.1:0",
+				Backend:     "b",
+				Shim:        "s",
+			},
+			wantErr: "dns_server port must not be zero",
+		},
+		{
 			name: "missing backend",
 			cfg: Configuration{
 				IPv4Address: "10.0.0.1/24",
@@ -136,6 +166,24 @@ func TestConfiguration_Validate(t *testing.T) {
 				Shim:        "s",
 			},
 		},
+		{
+			name: "valid ipv4 dns server",
+			cfg: Configuration{
+				IPv4Address: "10.0.0.1/24",
+				DNSServer:   "1.1.1.1:53",
+				Backend:     "b",
+				Shim:        "s",
+			},
+		},
+		{
+			name: "valid ipv6 dns server",
+			cfg: Configuration{
+				IPv6Address: "fd00::1/64",
+				DNSServer:   "[2606:4700:4700::1111]:53",
+				Backend:     "b",
+				Shim:        "s",
+			},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -201,4 +249,26 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 			t.Fatalf("UDPIdleTimeout = %v, want 10s", sc.UDPIdleTimeout)
 		}
 	})
+	t.Run("dns server", func(t *testing.T) {
+		cfg := Configuration{IPv4Address: "10.0.0.1/24", DNSServer: "1.1.1.1:53", Backend: "b", Shim: "s"}
+		sc := cfg.ServerConfig(nil, nil, 0, nil)
+		if sc.DNSServer != cfg.DNSServer {
+			t.Fatalf("DNSServer = %q, want %q", sc.DNSServer, cfg.DNSServer)
+		}
+	})
+}
+
+func TestParseDNSServer(t *testing.T) {
+	target, err := parseDNSServer("[2606:4700:4700::1111]:5353")
+	if err != nil {
+		t.Fatalf("parseDNSServer: %v", err)
+	}
+	if target.Network != "tcp" || target.Protocol != "dns" || target.Host != "2606:4700:4700::1111" || target.Port != 5353 {
+		t.Fatalf("target = %#v", target)
+	}
+
+	target, err = parseDNSServer("")
+	if err != nil || target != nil {
+		t.Fatalf("empty parseDNSServer = (%#v, %v), want (nil, nil)", target, err)
+	}
 }
