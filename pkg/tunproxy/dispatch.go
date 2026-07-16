@@ -6,10 +6,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/counting"
 	"github.com/puppy/pkg/common/stats"
 	"github.com/puppy/pkg/shim"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
@@ -90,6 +92,10 @@ func (d *dispatcher) HandleTCP(req *tcp.ForwarderRequest) {
 	host, port := targetFromEndpointID(id)
 	target := common.Target{Network: "tcp", Host: host, Port: port}
 
+	if d.stats != nil {
+		d.stats.IncTotal()
+	}
+
 	d.wg.Add(1)
 	go func() {
 		defer d.wg.Done()
@@ -106,6 +112,16 @@ func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
 		req.Complete(true)
 		return
 	}
+	remoteAddr := remoteAddrFromConn(frontend)
+	d.logger.Info("tunproxy: tcp route selected", "original_target", originalTarget.Address(), "target", target.Address(), "remote_addr", remoteAddr)
+	d.serveTCPConn(frontend, target, remoteAddr, dnsRedirect)
+}
+
+// serveTCPConn drives the post-handshake part of a TCP session: backend
+// selection, optional protocol detection, backend dial, and relay. It is split
+// out from serveTCP so that the netstack-free core logic can be unit tested.
+func (d *dispatcher) serveTCPConn(frontend net.Conn, target common.Target, remoteAddr string, dnsRedirect bool) {
+	var err error
 	var frontendConn io.ReadWriteCloser = frontend
 	var backend common.Backend
 	var backendIndex int
@@ -126,35 +142,109 @@ func (d *dispatcher) serveTCP(req *tcp.ForwarderRequest, target common.Target) {
 	} else if !dnsRedirect {
 		target.Protocol = common.ProtocolUnknown
 	}
-	d.logger.Info("tunproxy: tcp route selected", "original_target", originalTarget.Address(), "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback)
+	d.logger.Info("tunproxy: tcp backend selected", "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback)
 
 	upstream, err := backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
+		if d.stats != nil {
+			d.stats.IncDialFailure()
+		}
+		if d.bus != nil {
+			d.bus.Publish(stats.Event{Type: stats.EventDialFailed, Frontend: d.name, Target: target.Address(), RemoteAddr: remoteAddr, Message: "backend dial failed"})
+		}
 		d.logger.Info("tunproxy: tcp backend dial failed", "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback, "err", err)
 		_ = frontendConn.Close()
 		return
 	}
+	d.runTCPRelay(frontendConn, upstream, target, remoteAddr, "tunproxy: tcp")
+}
+
+// remoteAddrFromConn extracts the remote address string from a net.Conn if
+// available. It returns an empty string when the connection does not expose
+// a RemoteAddr method.
+func remoteAddrFromConn(conn io.ReadWriteCloser) string {
+	if nc, ok := conn.(interface{ RemoteAddr() net.Addr }); ok {
+		if addr := nc.RemoteAddr(); addr != nil {
+			return addr.String()
+		}
+	}
+	return ""
+}
+
+// runTCPRelay wires a TCP frontend to a backend upstream, registering the
+// connection with stats and wrapping the frontend with a byte-counting
+// connection. It takes ownership of both connections and closes them on return.
+func (d *dispatcher) runTCPRelay(frontendConn, upstream io.ReadWriteCloser, target common.Target, remoteAddr, logPrefix string) {
 	defer func() {
 		_ = frontendConn.Close()
 		_ = upstream.Close()
 	}()
+	if d.stats != nil {
+		d.stats.IncDialSuccess()
+	}
+
+	// Register the connection for stats tracking and wrap the frontend side
+	// with a counting connection so per-connection and global byte counters
+	// stay in sync.
+	var connInfo *stats.ConnectionInfo
+	if d.connReg != nil {
+		connInfo = d.connReg.Register(&stats.ConnectionInfo{
+			ID:         stats.GenerateConnectionID(),
+			Frontend:   d.name,
+			RemoteAddr: remoteAddr,
+			Target:     target,
+			Protocol:   target.Protocol,
+			Network:    target.Net(),
+		})
+		if d.stats != nil {
+			d.stats.IncActive()
+		}
+		if d.bus != nil {
+			d.bus.Publish(stats.Event{Type: stats.EventConnect, Frontend: d.name, ConnectionID: connInfo.ID, Target: target.Address(), RemoteAddr: remoteAddr})
+		}
+	}
+	wrappedFrontend := frontendConn
+	if d.connReg != nil || d.stats != nil {
+		wrappedFrontend = counting.NewConn(frontendConn, connInfo, d.stats)
+	}
 
 	shimCfg := shim.ShimServerConfiguration{
-		Frontend:   frontendConn,
+		Frontend:   wrappedFrontend,
 		Backend:    upstream,
 		BufferSize: d.shimBuf,
 	}
 	if err := shimCfg.Validate(); err != nil {
-		d.logger.Error("tunproxy: shim configuration invalid", "target", target.Address(), "err", err)
+		d.logger.Error(logPrefix+" shim configuration invalid", "target", target.Address(), "err", err)
+		d.removeTCPConn(connInfo, remoteAddr)
 		return
 	}
 	s, err := shim.NewShimServer(shimCfg)
 	if err != nil {
-		d.logger.Error("tunproxy: shim construction failed", "target", target.Address(), "err", err)
+		d.logger.Error(logPrefix+" shim construction failed", "target", target.Address(), "err", err)
+		d.removeTCPConn(connInfo, remoteAddr)
 		return
 	}
-	d.logger.Info("tunproxy: tcp tunnel established", "target", target.Address())
+	d.logger.Info(logPrefix+" tunnel established", "target", target.Address(), "remote_addr", remoteAddr)
 	_, _, _ = s.Run(d.ctx)
+
+	d.removeTCPConn(connInfo, remoteAddr)
+}
+
+// removeTCPConn removes the connection from the registry, decrements the active
+// counter, and publishes a disconnect event. It is a no-op when connInfo is nil.
+func (d *dispatcher) removeTCPConn(connInfo *stats.ConnectionInfo, remoteAddr string) {
+	if connInfo == nil {
+		return
+	}
+	if d.connReg != nil {
+		d.connReg.Remove(connInfo.ID)
+	}
+	if d.stats != nil {
+		d.stats.DecActive()
+	}
+	if d.bus != nil {
+		d.bus.Publish(stats.Event{Type: stats.EventDisconnect, Frontend: d.name, ConnectionID: connInfo.ID, Target: connInfo.Target.Address(), RemoteAddr: remoteAddr})
+	}
 }
 
 // HandleUDP is invoked by the netstack UDP forwarder for each new datagram
@@ -258,31 +348,25 @@ func (d *dispatcher) serveInterceptedDNSStream(frontend io.ReadWriteCloser) {
 		d.logger.Error("tunproxy: systemd-resolved tcp dns interception has no configured target")
 		return
 	}
+	if d.stats != nil {
+		d.stats.IncTotal()
+	}
 	target := *d.dns
 	backend, backendIndex, fallback := d.selectBackend(target)
 	d.logger.Info("tunproxy: systemd-resolved tcp dns route selected", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback)
 	upstream, err := backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
+		if d.stats != nil {
+			d.stats.IncDialFailure()
+		}
+		if d.bus != nil {
+			d.bus.Publish(stats.Event{Type: stats.EventDialFailed, Frontend: d.name, Target: target.Address(), RemoteAddr: "127.0.0.1", Message: "backend dial failed"})
+		}
 		d.logger.Info("tunproxy: systemd-resolved tcp dns backend dial failed", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback, "err", err)
+		_ = frontend.Close()
 		return
 	}
-	defer upstream.Close()
-
-	shimCfg := shim.ShimServerConfiguration{
-		Frontend:   frontend,
-		Backend:    upstream,
-		BufferSize: d.shimBuf,
-	}
-	if err := shimCfg.Validate(); err != nil {
-		d.logger.Error("tunproxy: systemd-resolved tcp dns shim configuration invalid", "target", target.Address(), "err", err)
-		return
-	}
-	s, err := shim.NewShimServer(shimCfg)
-	if err != nil {
-		d.logger.Error("tunproxy: systemd-resolved tcp dns shim construction failed", "target", target.Address(), "err", err)
-		return
-	}
-	_, _, _ = s.Run(d.ctx)
+	d.runTCPRelay(frontend, upstream, target, "127.0.0.1", "tunproxy: systemd-resolved tcp dns")
 }
 
 // resolveInterceptedDNSDatagram carries one redirected UDP DNS query over a
