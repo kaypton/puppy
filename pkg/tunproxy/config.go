@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
 )
 
 // Type identifies the TUN proxy frontend in a named configuration group.
@@ -133,7 +134,7 @@ func validateAddresses(ipv4Address, ipv6Address string) error {
 
 // ServerConfig adds runtime dependencies to the frontend's file configuration
 // and validates the resulting runtime configuration.
-func (c Configuration) ServerConfig(backends []common.Backend, fallback common.Backend, shimBufferSize int, logger *slog.Logger) (ServerConfiguration, error) {
+func (c Configuration) ServerConfig(backends []common.Backend, fallback common.Backend, shimBufferSize int, logger *slog.Logger, statsDeps stats.Deps) (ServerConfiguration, error) {
 	mtu := uint32(c.MTU)
 	udpIdle := time.Duration(c.UDPIdleTimeout) * time.Second
 	if c.UDPIdleTimeout <= 0 {
@@ -165,6 +166,10 @@ func (c Configuration) ServerConfig(backends []common.Backend, fallback common.B
 		ProtocolDetectMaxBytes: detectMaxBytes,
 		ShimBufferSize:         shimBufferSize,
 		Logger:                 logger,
+		Name:                   statsDeps.Name,
+		Stats:                  statsDeps.Stats,
+		ConnReg:                statsDeps.ConnReg,
+		Bus:                    statsDeps.Bus,
 	}
 	if err := sc.Validate(); err != nil {
 		return ServerConfiguration{}, err

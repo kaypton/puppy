@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
 )
 
 // ServerConfiguration configures a TUN proxy server.
@@ -26,6 +27,17 @@ type ServerConfiguration struct {
 	ProtocolDetectMaxBytes int
 	ShimBufferSize         int
 	Logger                 *slog.Logger
+	// Name identifies this frontend in stats and dashboard views. When
+	// non-empty, accepted sessions are attributed to this name.
+	Name string
+	// Stats receives global counter updates. When nil, no global statistics
+	// are collected.
+	Stats *stats.StatsRegistry
+	// ConnReg tracks active sessions for this frontend. When nil, no
+	// per-session registry is maintained.
+	ConnReg *stats.ConnectionRegistry
+	// Bus broadcasts lifecycle events. When nil, no events are published.
+	Bus *stats.EventBus
 }
 
 // Validate checks the runtime configuration fields.
@@ -135,7 +147,22 @@ func (s *Server) Run(ctx context.Context) (runErr error) {
 		return fmt.Errorf("tunproxy: configure host network: %w", err)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
-	dispatcher := newDispatcher(runCtx, ns, s.config.Backends, s.config.Fallback, dialer, s.dns, s.config.ShimBufferSize, s.config.UDPIdleTimeout, s.config.ProtocolDetectTimeout, s.config.ProtocolDetectMaxBytes, s.logger)
+	dispatcher := newDispatcher(runCtx, DispatcherConfiguration{
+		NS:             ns,
+		Backends:       s.config.Backends,
+		Fallback:       s.config.Fallback,
+		Dialer:         dialer,
+		DNS:            s.dns,
+		ShimBuf:        s.config.ShimBufferSize,
+		UDPIdle:        s.config.UDPIdleTimeout,
+		DetectTimeout:  s.config.ProtocolDetectTimeout,
+		DetectMaxBytes: s.config.ProtocolDetectMaxBytes,
+		Logger:         s.logger,
+		Name:           s.config.Name,
+		Stats:          s.config.Stats,
+		ConnReg:        s.config.ConnReg,
+		Bus:            s.config.Bus,
+	})
 	ns.handler = dispatcher
 	defer func() {
 		// Restore host routing before waiting for sessions. In particular, UDP

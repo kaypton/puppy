@@ -87,8 +87,22 @@ func TestDispatcher_HandleUDPRegistersFlowBeforeBackendDial(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	backend := newBlockingBackend()
 	dispatcher := newDispatcher(
-		ctx, ns, []common.Backend{backend}, commonFallback(), nil, nil, 0, time.Second, time.Second, defaultProtocolDetectMaxBytes,
-		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ctx,
+		DispatcherConfiguration{
+			NS:             ns,
+			Backends:       []common.Backend{backend},
+			Fallback:       commonFallback(),
+			Dialer:         nil,
+			ShimBuf:        0,
+			UDPIdle:        time.Second,
+			DetectTimeout:  time.Second,
+			DetectMaxBytes: defaultProtocolDetectMaxBytes,
+			Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+			Name:           "",
+			Stats:          nil,
+			ConnReg:        nil,
+			Bus:            nil,
+		},
 	)
 	ns.handler = dispatcher
 

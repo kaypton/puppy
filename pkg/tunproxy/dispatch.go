@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
 	"github.com/puppy/pkg/shim"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/tcp"
 	"github.com/sagernet/gvisor/pkg/tcpip/transport/udp"
@@ -19,6 +20,25 @@ const (
 	dnsPort           uint16 = 53
 	maxDNSMessageSize        = 1<<16 - 1
 )
+
+// DispatcherConfiguration bundles the non-context dependencies required to
+// construct a dispatcher. The context is passed separately to newDispatcher.
+type DispatcherConfiguration struct {
+	NS             *networkStack
+	Backends       []common.Backend
+	Fallback       common.Backend
+	Dialer         common.Dialer
+	DNS            *common.Target
+	ShimBuf        int
+	UDPIdle        time.Duration
+	DetectTimeout  time.Duration
+	DetectMaxBytes int
+	Logger         *slog.Logger
+	Name           string
+	Stats          *stats.StatsRegistry
+	ConnReg        *stats.ConnectionRegistry
+	Bus            *stats.EventBus
+}
 
 // dispatcher implements sessionHandler. It accepts TCP/UDP sessions from the
 // netstack and forwards them to a common.Backend.
@@ -35,23 +55,31 @@ type dispatcher struct {
 	logger         *slog.Logger
 	ctx            context.Context
 	wg             sync.WaitGroup
+	name           string
+	stats          *stats.StatsRegistry
+	connReg        *stats.ConnectionRegistry
+	bus            *stats.EventBus
 }
 
 // newDispatcher creates a dispatcher bound to the given context. Run must be
 // cancelled to release in-flight sessions.
-func newDispatcher(ctx context.Context, ns *networkStack, backends []common.Backend, fallback common.Backend, dialer common.Dialer, dns *common.Target, shimBuf int, udpIdle, detectTimeout time.Duration, detectMaxBytes int, logger *slog.Logger) *dispatcher {
+func newDispatcher(ctx context.Context, config DispatcherConfiguration) *dispatcher {
 	return &dispatcher{
-		ns:             ns,
-		backends:       backends,
-		fallback:       fallback,
-		dialer:         dialer,
-		dns:            dns,
-		shimBuf:        shimBuf,
-		udpIdle:        udpIdle,
-		detectTimeout:  detectTimeout,
-		detectMaxBytes: detectMaxBytes,
-		logger:         logger,
+		ns:             config.NS,
+		backends:       config.Backends,
+		fallback:       config.Fallback,
+		dialer:         config.Dialer,
+		dns:            config.DNS,
+		shimBuf:        config.ShimBuf,
+		udpIdle:        config.UDPIdle,
+		detectTimeout:  config.DetectTimeout,
+		detectMaxBytes: config.DetectMaxBytes,
+		logger:         config.Logger,
 		ctx:            ctx,
+		name:           config.Name,
+		stats:          config.Stats,
+		connReg:        config.ConnReg,
+		bus:            config.Bus,
 	}
 }
 

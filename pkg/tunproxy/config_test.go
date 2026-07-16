@@ -7,7 +7,10 @@ import (
 
 	"github.com/puppy/pkg/adapter/direct"
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
 )
+
+var emptyStatsDeps = stats.Deps{Name: "test"}
 
 func TestConfiguration_Validate(t *testing.T) {
 	autoRoute := true
@@ -213,7 +216,7 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 	fallback := common.Backend(direct.NewBackend())
 	t.Run("default udp idle and auto_route", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", Backend: "b", Shim: "s"}
-		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil, emptyStatsDeps)
 		if err != nil {
 			t.Fatalf("ServerConfig: %v", err)
 		}
@@ -238,7 +241,7 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 		if got := cfg.BackendReferences(); len(got) != 2 || got[0] != "first" || got[1] != "second" {
 			t.Fatalf("BackendReferences = %v", got)
 		}
-		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil, emptyStatsDeps)
 		if err != nil {
 			t.Fatalf("ServerConfig: %v", err)
 		}
@@ -248,7 +251,7 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 	})
 	t.Run("explicit auto_route false", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", AutoRoute: &autoRoute, Backend: "b", Shim: "s"}
-		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil, emptyStatsDeps)
 		if err != nil {
 			t.Fatalf("ServerConfig: %v", err)
 		}
@@ -258,7 +261,7 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 	})
 	t.Run("explicit udp idle", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", UDPIdleTimeout: 10, Backend: "b", Shim: "s"}
-		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil, emptyStatsDeps)
 		if err != nil {
 			t.Fatalf("ServerConfig: %v", err)
 		}
@@ -268,7 +271,7 @@ func TestConfiguration_ServerConfigDefaults(t *testing.T) {
 	})
 	t.Run("dns server", func(t *testing.T) {
 		cfg := Configuration{IPv4Address: "10.0.0.1/24", DNSServer: "1.1.1.1:53", Backend: "b", Shim: "s"}
-		sc, err := cfg.ServerConfig(backends, fallback, 0, nil)
+		sc, err := cfg.ServerConfig(backends, fallback, 0, nil, emptyStatsDeps)
 		if err != nil {
 			t.Fatalf("ServerConfig: %v", err)
 		}

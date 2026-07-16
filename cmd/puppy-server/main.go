@@ -593,7 +593,7 @@ func buildFrontend(config *configuration, logger *slog.Logger, statsDeps stats.D
 			}
 		}
 		shimConfig := config.Shims[frontendConfig.Shim]
-		rc, err := frontendConfig.ServerConfig(backends, fallback, shimConfig.BufferSize, logger)
+		rc, err := frontendConfig.ServerConfig(backends, fallback, shimConfig.BufferSize, logger, statsDeps)
 		if err != nil {
 			return nil, fmt.Errorf("build frontend %q: %w", config.Frontend, err)
 		}
