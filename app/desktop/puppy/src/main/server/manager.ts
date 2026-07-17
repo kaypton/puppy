@@ -34,11 +34,20 @@ export function getLogs(): ServerLogEntry[] {
 }
 
 function resolveDefaultBinary(): string | null {
-  // 开发期：从 app 目录回溯到仓库根找 bin/puppy-server
+  // Packaged app: the bundled binary is named puppy-server-<os>-<arch>, matching
+  // process.platform/process.arch (e.g. linux-x64, darwin-arm64), and lives next
+  // to process.resourcesPath.
+  const binaryName = `puppy-server-${process.platform}-${process.arch}`
+  const bundled = join(process.resourcesPath, 'bin', binaryName)
+  if (existsSync(bundled)) return bundled
+
+  // Development: from this file (app/desktop/puppy/src/main/server/manager.ts)
+  // walk up to the repository root and look for the same platform/arch binary.
   let dir = dirname(dirname(dirname(dirname(__dirname))))
   for (let i = 0; i < 6; i++) {
-    const candidate = join(dir, 'bin', 'puppy-server')
+    const candidate = join(dir, 'bin', binaryName)
     if (existsSync(candidate)) return candidate
+
     const parent = dirname(dir)
     if (parent === dir) break
     dir = parent
@@ -60,7 +69,7 @@ export function start(): Promise<IpcResult<ServerProcessStatus>> {
         ok: false,
         error: cfg.binaryPath
           ? `binary not found at ${cfg.binaryPath}`
-          : 'binary path not configured and bin/puppy-server not found in repository'
+          : 'binary path not configured and bundled bin/puppy-server not found'
       })
       return
     }
@@ -111,7 +120,7 @@ export function start(): Promise<IpcResult<ServerProcessStatus>> {
       child = null
     })
 
-    // 给 spawn 一点时间确认无立即报错
+    // Give spawn a moment to surface an immediate failure.
     setTimeout(() => {
       if (child && child.exitCode === null) {
         resolve({ ok: true, data: getStatus() })
@@ -137,7 +146,7 @@ export async function stop(): Promise<IpcResult<ServerProcessStatus>> {
       resolve({ ok: true, data: getStatus() })
     }
     proc.on('exit', onExit)
-    // 优先 SIGTERM 优雅退出，3s 后 SIGKILL
+    // Prefer SIGTERM for graceful shutdown, then SIGKILL after 3s.
     proc.kill('SIGTERM')
     setTimeout(() => {
       if (proc.exitCode === null && !proc.killed) {
