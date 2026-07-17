@@ -253,6 +253,9 @@ func (d *dispatcher) HandleUDP(req *udp.ForwarderRequest) {
 	id := req.ID()
 	host, port := targetFromEndpointID(id)
 	target := common.Target{Network: "udp", Host: host, Port: port}
+	if d.stats != nil {
+		d.stats.IncTotal()
+	}
 	// Register the endpoint before returning from the forwarder callback. If
 	// backend dialing happens first, subsequent datagrams for the same flow can
 	// trigger additional ForwarderRequests and race to bind the same port.
@@ -270,39 +273,54 @@ func (d *dispatcher) HandleUDP(req *udp.ForwarderRequest) {
 }
 
 func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target) {
-	defer frontend.Close()
+	remoteAddr := remoteAddrFromConn(frontend)
 	if dnsTarget, ok := d.redirectDNS(target); ok {
-		d.serveUDPDNS(frontend, target, dnsTarget)
+		d.serveUDPDNS(frontend, target, dnsTarget, remoteAddr)
 		return
 	}
 	target.Protocol = common.ProtocolUnknown
 	backend, backendIndex, fallback := d.selectBackend(target)
-	d.logger.Info("tunproxy: udp route selected", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback)
+	d.logger.Info("tunproxy: udp route selected", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback, "remote_addr", remoteAddr)
 	upstream, err := backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
+		if d.stats != nil {
+			d.stats.IncDialFailure()
+		}
+		if d.bus != nil {
+			d.bus.Publish(stats.Event{Type: stats.EventDialFailed, Frontend: d.name, Target: target.Address(), RemoteAddr: remoteAddr, Message: "backend dial failed"})
+		}
 		d.logger.Info("tunproxy: udp backend dial failed", "target", target.Address(), "backend_index", backendIndex, "fallback", fallback, "err", err)
+		_ = frontend.Close()
 		return
 	}
-	defer upstream.Close()
+	if d.stats != nil {
+		d.stats.IncDialSuccess()
+	}
+	connInfo, wrappedFrontend := d.registerUDPConn(frontend, target, remoteAddr)
+	defer d.removeUDPConn(connInfo, remoteAddr, target)
+	defer func() {
+		_ = wrappedFrontend.Close()
+		_ = upstream.Close()
+	}()
 
-	d.logger.Info("tunproxy: udp tunnel established", "target", target.Address())
+	d.logger.Info("tunproxy: udp tunnel established", "target", target.Address(), "remote_addr", remoteAddr)
 
 	idleReset := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	defer close(stop)
-	go d.watchUDPIdle(frontend, upstream, idleReset, stop)
+	go d.watchUDPIdle(wrappedFrontend, upstream, idleReset, stop)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		pipeUDP(frontend, upstream, idleReset)
+		pipeUDP(wrappedFrontend, upstream, idleReset)
 		_ = upstream.Close()
 	}()
 	go func() {
 		defer wg.Done()
-		pipeUDP(upstream, frontend, idleReset)
-		_ = frontend.Close()
+		pipeUDP(upstream, wrappedFrontend, idleReset)
+		_ = wrappedFrontend.Close()
 	}()
 	wg.Wait()
 }
@@ -310,35 +328,100 @@ func (d *dispatcher) serveUDP(frontend io.ReadWriteCloser, target common.Target)
 // serveUDPDNS converts each intercepted UDP DNS datagram to the two-byte
 // length-prefixed DNS-over-TCP format expected by the backend connection. The
 // TCP connection is reused for the lifetime of the UDP flow.
-func (d *dispatcher) serveUDPDNS(frontend io.ReadWriteCloser, originalTarget, target common.Target) {
+func (d *dispatcher) serveUDPDNS(frontend io.ReadWriteCloser, originalTarget, target common.Target, remoteAddr string) {
 	backend, backendIndex, fallback := d.selectBackend(target)
-	d.logger.Info("tunproxy: udp dns route selected", "original_target", originalTarget.Address(), "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback)
+	d.logger.Info("tunproxy: udp dns route selected", "original_target", originalTarget.Address(), "target", target.Address(), "protocol", target.Protocol, "backend_index", backendIndex, "fallback", fallback, "remote_addr", remoteAddr)
 	upstream, err := backend.Dial(d.ctx, target, d.dialer)
 	if err != nil {
+		if d.stats != nil {
+			d.stats.IncDialFailure()
+		}
+		if d.bus != nil {
+			d.bus.Publish(stats.Event{Type: stats.EventDialFailed, Frontend: d.name, Target: target.Address(), RemoteAddr: remoteAddr, Message: "backend dial failed"})
+		}
 		d.logger.Info("tunproxy: udp dns backend dial failed", "original_target", originalTarget.Address(), "target", target.Address(), "backend_index", backendIndex, "fallback", fallback, "err", err)
+		_ = frontend.Close()
 		return
 	}
-	defer upstream.Close()
+	if d.stats != nil {
+		d.stats.IncDialSuccess()
+	}
+	connInfo, wrappedFrontend := d.registerUDPConn(frontend, target, remoteAddr)
+	defer d.removeUDPConn(connInfo, remoteAddr, target)
+	defer func() {
+		_ = wrappedFrontend.Close()
+		_ = upstream.Close()
+	}()
 
-	d.logger.Info("tunproxy: udp dns tunnel established", "original_target", originalTarget.Address(), "target", target.Address())
+	d.logger.Info("tunproxy: udp dns tunnel established", "original_target", originalTarget.Address(), "target", target.Address(), "remote_addr", remoteAddr)
 	idleReset := make(chan struct{}, 1)
 	stop := make(chan struct{})
 	defer close(stop)
-	go d.watchUDPIdle(frontend, upstream, idleReset, stop)
+	go d.watchUDPIdle(wrappedFrontend, upstream, idleReset, stop)
 
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		_ = pipeUDPToDNSStream(upstream, frontend, idleReset)
+		_ = pipeUDPToDNSStream(upstream, wrappedFrontend, idleReset)
 		_ = upstream.Close()
 	}()
 	go func() {
 		defer wg.Done()
-		_ = pipeDNSStreamToUDP(frontend, upstream, idleReset)
-		_ = frontend.Close()
+		_ = pipeDNSStreamToUDP(wrappedFrontend, upstream, idleReset)
+		_ = wrappedFrontend.Close()
 	}()
 	wg.Wait()
+}
+
+// registerUDPConn registers a UDP session with the connection registry,
+// increments the active counter, and publishes a connect event. It returns the
+// registered ConnectionInfo (or nil if the registry is disabled) and a
+// frontend connection wrapped with byte counting when instrumentation is on.
+func (d *dispatcher) registerUDPConn(frontend io.ReadWriteCloser, target common.Target, remoteAddr string) (*stats.ConnectionInfo, io.ReadWriteCloser) {
+	if d.connReg == nil && d.stats == nil && d.bus == nil {
+		return nil, frontend
+	}
+	var connInfo *stats.ConnectionInfo
+	if d.connReg != nil {
+		connInfo = d.connReg.Register(&stats.ConnectionInfo{
+			ID:         stats.GenerateConnectionID(),
+			Frontend:   d.name,
+			RemoteAddr: remoteAddr,
+			Target:     target,
+			Protocol:   target.Protocol,
+			Network:    target.Net(),
+		})
+		if d.stats != nil {
+			d.stats.IncActive()
+		}
+		if d.bus != nil {
+			d.bus.Publish(stats.Event{Type: stats.EventConnect, Frontend: d.name, ConnectionID: connInfo.ID, Target: target.Address(), RemoteAddr: remoteAddr})
+		}
+	}
+	wrappedFrontend := frontend
+	if d.connReg != nil || d.stats != nil {
+		wrappedFrontend = counting.NewConn(frontend, connInfo, d.stats)
+	}
+	return connInfo, wrappedFrontend
+}
+
+// removeUDPConn removes the UDP connection from the registry, decrements the
+// active counter, and publishes a disconnect event. It is a no-op when
+// connInfo is nil.
+func (d *dispatcher) removeUDPConn(connInfo *stats.ConnectionInfo, remoteAddr string, target common.Target) {
+	if connInfo == nil {
+		return
+	}
+	if d.connReg != nil {
+		d.connReg.Remove(connInfo.ID)
+	}
+	if d.stats != nil {
+		d.stats.DecActive()
+	}
+	if d.bus != nil {
+		d.bus.Publish(stats.Event{Type: stats.EventDisconnect, Frontend: d.name, ConnectionID: connInfo.ID, Target: target.Address(), RemoteAddr: remoteAddr})
+	}
 }
 
 // serveInterceptedDNSStream forwards a TCP DNS connection redirected from the
