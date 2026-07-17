@@ -227,7 +227,7 @@ func TestDispatcher_ServeUDPDNSFramesAndRoutesTCP(t *testing.T) {
 	}
 	done := make(chan struct{})
 	go func() {
-		dispatcher.serveUDPDNS(frontend, common.Target{Network: "udp", Host: "192.0.2.53", Port: 53}, dnsTarget)
+		dispatcher.serveUDPDNS(frontend, common.Target{Network: "udp", Host: "192.0.2.53", Port: 53}, dnsTarget, "127.0.0.1")
 		close(done)
 	}()
 
@@ -789,7 +789,268 @@ func TestDispatcher_TCPStatsLifecycle(t *testing.T) {
 	})
 }
 
+func TestDispatcher_UDPStatsLifecycle(t *testing.T) {
+	t.Run("dial failure publishes dial_failed event", func(t *testing.T) {
+		registry := stats.NewStatsRegistry()
+		connReg := stats.NewConnectionRegistry()
+		bus := stats.NewEventBus()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := bus.Subscribe(ctx, stats.EventConnect, stats.EventDisconnect, stats.EventDialFailed)
+
+		backend := &dialBackend{
+			capabilities: []common.Capability{{Network: "udp", Protocol: common.ProtocolAny}},
+			err:          errors.New("refused"),
+			targets:      make(chan common.Target, 1),
+		}
+		dispatcher := &dispatcher{
+			backends: []common.Backend{backend},
+			fallback: commonFallback(),
+			ctx:      ctx,
+			logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			name:     "tun-test",
+			stats:    registry,
+			connReg:  connReg,
+			bus:      bus,
+			udpIdle:  time.Second,
+		}
+
+		frontend, client := net.Pipe()
+		defer func() { _ = frontend.Close(); _ = client.Close() }()
+		dispatcher.serveUDP(frontend, common.Target{Network: "udp", Host: "203.0.113.9", Port: 80})
+
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventDialFailed {
+				t.Fatalf("event type = %s, want dial_failed", ev.Type)
+			}
+			if ev.Frontend != "tun-test" {
+				t.Errorf("frontend = %s, want tun-test", ev.Frontend)
+			}
+			if ev.RemoteAddr != frontend.RemoteAddr().String() {
+				t.Errorf("RemoteAddr = %s, want %s", ev.RemoteAddr, frontend.RemoteAddr().String())
+			}
+			if ev.Message != "backend dial failed" {
+				t.Errorf("Message = %s, want backend dial failed", ev.Message)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected dial_failed event")
+		}
+
+		snap := registry.Snapshot()
+		if snap.TotalConnections != 0 {
+			t.Errorf("TotalConnections = %d, want 0 (entry is in HandleUDP)", snap.TotalConnections)
+		}
+		if snap.DialSuccesses != 0 {
+			t.Errorf("DialSuccesses = %d, want 0", snap.DialSuccesses)
+		}
+		if snap.DialFailures != 1 {
+			t.Errorf("DialFailures = %d, want 1", snap.DialFailures)
+		}
+		if snap.ActiveConnections != 0 {
+			t.Errorf("ActiveConnections = %d, want 0", snap.ActiveConnections)
+		}
+		if connReg.Count() != 0 {
+			t.Errorf("registry count = %d, want 0", connReg.Count())
+		}
+	})
+
+	t.Run("successful tunnel publishes connect and disconnect", func(t *testing.T) {
+		registry := stats.NewStatsRegistry()
+		connReg := stats.NewConnectionRegistry()
+		bus := stats.NewEventBus()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := bus.Subscribe(ctx, stats.EventConnect, stats.EventDisconnect, stats.EventDialFailed)
+
+		upFrontend, upstream := net.Pipe()
+		t.Cleanup(func() { _ = upFrontend.Close(); _ = upstream.Close() })
+		backend := &dialBackend{
+			capabilities: []common.Capability{{Network: "udp", Protocol: common.ProtocolAny}},
+			conn:         upstream,
+			targets:      make(chan common.Target, 1),
+		}
+		dispatcher := &dispatcher{
+			backends: []common.Backend{backend},
+			fallback: commonFallback(),
+			ctx:      ctx,
+			logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			name:     "tun-test",
+			stats:    registry,
+			connReg:  connReg,
+			bus:      bus,
+			udpIdle:  50 * time.Millisecond,
+		}
+
+		frontend, client := net.Pipe()
+		defer func() { _ = frontend.Close(); _ = client.Close() }()
+		go dispatcher.serveUDP(frontend, common.Target{Network: "udp", Host: "203.0.113.9", Port: 80})
+
+		select {
+		case got := <-backend.targets:
+			want := common.Target{Network: "udp", Protocol: common.ProtocolUnknown, Host: "203.0.113.9", Port: 80}
+			if got != want {
+				t.Fatalf("backend target = %#v, want %#v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("backend was not dialed")
+		}
+
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventConnect {
+				t.Fatalf("event type = %s, want connect", ev.Type)
+			}
+			if ev.Frontend != "tun-test" {
+				t.Errorf("frontend = %s, want tun-test", ev.Frontend)
+			}
+			if ev.RemoteAddr != frontend.RemoteAddr().String() {
+				t.Errorf("RemoteAddr = %s, want %s", ev.RemoteAddr, frontend.RemoteAddr().String())
+			}
+			if connReg.Count() != 1 {
+				t.Errorf("registry count = %d, want 1", connReg.Count())
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected connect event")
+		}
+
+		clientWrite := []byte("hello upstream")
+		upRead := make(chan int, 1)
+		go func() {
+			n, _ := upFrontend.Read(make([]byte, len(clientWrite)))
+			upRead <- n
+		}()
+		if _, err := client.Write(clientWrite); err != nil {
+			t.Fatalf("client write: %v", err)
+		}
+		select {
+		case n := <-upRead:
+			if n != len(clientWrite) {
+				t.Errorf("upstream read %d bytes, want %d", n, len(clientWrite))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("upstream did not read data")
+		}
+
+		upWrite := []byte("hello client")
+		clientRead := make(chan int, 1)
+		go func() {
+			buf := make([]byte, len(upWrite))
+			n, _ := client.Read(buf)
+			clientRead <- n
+		}()
+		if _, err := upFrontend.Write(upWrite); err != nil {
+			t.Fatalf("upstream write: %v", err)
+		}
+		select {
+		case n := <-clientRead:
+			if n != len(upWrite) {
+				t.Errorf("client read %d bytes, want %d", n, len(upWrite))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("client did not read data")
+		}
+
+		_ = client.Close()
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventDisconnect {
+				t.Fatalf("event type = %s, want disconnect", ev.Type)
+			}
+			if ev.RemoteAddr != frontend.RemoteAddr().String() {
+				t.Errorf("disconnect RemoteAddr = %s, want %s", ev.RemoteAddr, frontend.RemoteAddr().String())
+			}
+		case <-time.After(200 * time.Millisecond):
+			t.Fatal("expected disconnect event")
+		}
+
+		snap := registry.Snapshot()
+		if snap.TotalConnections != 0 {
+			t.Errorf("TotalConnections = %d, want 0 (entry is in HandleUDP)", snap.TotalConnections)
+		}
+		if snap.DialSuccesses != 1 {
+			t.Errorf("DialSuccesses = %d, want 1", snap.DialSuccesses)
+		}
+		if snap.DialFailures != 0 {
+			t.Errorf("DialFailures = %d, want 0", snap.DialFailures)
+		}
+		if snap.ActiveConnections != 0 {
+			t.Errorf("ActiveConnections = %d, want 0", snap.ActiveConnections)
+		}
+		if snap.BytesIn != uint64(len(clientWrite)) {
+			t.Errorf("BytesIn = %d, want %d", snap.BytesIn, len(clientWrite))
+		}
+		if snap.BytesOut != uint64(len(upWrite)) {
+			t.Errorf("BytesOut = %d, want %d", snap.BytesOut, len(upWrite))
+		}
+		if connReg.Count() != 0 {
+			t.Errorf("registry count after disconnect = %d, want 0", connReg.Count())
+		}
+	})
+
+	t.Run("handleudp increments total", func(t *testing.T) {
+		registry := stats.NewStatsRegistry()
+		device := newEAGAINDevice()
+		ns, err := newNetworkStack(device, device.MTU())
+		if err != nil {
+			t.Fatalf("newNetworkStack: %v", err)
+		}
+		defer ns.stop()
+		if err := ns.addAddress("10.0.0.1/24"); err != nil {
+			t.Fatalf("addAddress: %v", err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		backend := newBlockingBackend()
+		dispatcher := newDispatcher(
+			ctx,
+			DispatcherConfiguration{
+				NS:             ns,
+				Backends:       []common.Backend{backend},
+				Fallback:       commonFallback(),
+				Dialer:         nil,
+				ShimBuf:        0,
+				UDPIdle:        time.Second,
+				DetectTimeout:  time.Second,
+				DetectMaxBytes: defaultProtocolDetectMaxBytes,
+				Logger:         slog.New(slog.NewTextHandler(io.Discard, nil)),
+				Name:           "tun-test",
+				Stats:          registry,
+				ConnReg:        nil,
+				Bus:            nil,
+			},
+		)
+		ns.handler = dispatcher
+
+		injectIPv4UDP(t, ns, []byte("probe"))
+		select {
+		case <-backend.started:
+		case <-time.After(time.Second):
+			t.Fatal("backend Dial was not called")
+		}
+
+		snap := registry.Snapshot()
+		if snap.TotalConnections != 1 {
+			t.Errorf("TotalConnections = %d, want 1", snap.TotalConnections)
+		}
+		cancel()
+		done := make(chan struct{})
+		go func() {
+			dispatcher.wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("dispatcher did not stop after cancellation")
+		}
+	})
+}
+
 func commonFallback() common.Backend { return direct.NewBackend() }
+
+var _ common.Backend = (*blockingBackend)(nil)
 
 func injectIPv4UDP(t *testing.T, ns *networkStack, payload []byte) {
 	t.Helper()
