@@ -16,6 +16,7 @@ import (
 
 	"github.com/puppy/pkg/adapter/direct"
 	"github.com/puppy/pkg/common"
+	"github.com/puppy/pkg/common/stats"
 	"github.com/sagernet/gvisor/pkg/buffer"
 	"github.com/sagernet/gvisor/pkg/tcpip"
 	"github.com/sagernet/gvisor/pkg/tcpip/header"
@@ -36,6 +37,7 @@ type capabilityBackend struct {
 type dialBackend struct {
 	capabilities []common.Capability
 	conn         io.ReadWriteCloser
+	err          error
 	targets      chan common.Target
 }
 
@@ -49,6 +51,9 @@ func (b *dialBackend) Capabilities() []common.Capability { return b.capabilities
 
 func (b *dialBackend) Dial(_ context.Context, target common.Target, _ common.Dialer) (io.ReadWriteCloser, error) {
 	b.targets <- target
+	if b.err != nil {
+		return nil, b.err
+	}
 	return b.conn, nil
 }
 
@@ -495,6 +500,291 @@ func TestDNSStreamConversionRejectsMalformedFrames(t *testing.T) {
 		err := pipeDNSStreamToUDP(&datagramWriter{short: true}, bytes.NewReader([]byte{0, 1, 1}), make(chan struct{}, 1))
 		if !errors.Is(err, io.ErrShortWrite) {
 			t.Fatalf("error = %v, want short write", err)
+		}
+	})
+}
+
+func TestDispatcher_TCPStatsLifecycle(t *testing.T) {
+	t.Run("dial failure publishes dial_failed event", func(t *testing.T) {
+		registry := stats.NewStatsRegistry()
+		connReg := stats.NewConnectionRegistry()
+		bus := stats.NewEventBus()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := bus.Subscribe(ctx, stats.EventConnect, stats.EventDisconnect, stats.EventDialFailed)
+
+		dnsTarget := common.Target{Network: "tcp", Protocol: common.ProtocolDNS, Host: "1.1.1.1", Port: 53}
+		backend := &dialBackend{
+			capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolDNS}},
+			err:          errors.New("refused"),
+			targets:      make(chan common.Target, 1),
+		}
+		dispatcher := &dispatcher{
+			backends: []common.Backend{backend},
+			fallback: commonFallback(),
+			dns:      &dnsTarget,
+			ctx:      ctx,
+			logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			name:     "tun-test",
+			stats:    registry,
+			connReg:  connReg,
+			bus:      bus,
+		}
+
+		frontend, client := net.Pipe()
+		defer func() { _ = frontend.Close(); _ = client.Close() }()
+		dispatcher.serveInterceptedDNSStream(frontend)
+
+		select {
+		case got := <-backend.targets:
+			t.Logf("dial target: %#v", got)
+		default:
+			t.Log("dialBackend.Dial was not called")
+		}
+
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventDialFailed {
+				t.Fatalf("event type = %s, want dial_failed", ev.Type)
+			}
+			if ev.Frontend != "tun-test" {
+				t.Errorf("frontend = %s, want tun-test", ev.Frontend)
+			}
+			if ev.RemoteAddr != "127.0.0.1" {
+				t.Errorf("RemoteAddr = %s, want 127.0.0.1", ev.RemoteAddr)
+			}
+			if ev.Message != "backend dial failed" {
+				t.Errorf("Message = %s, want backend dial failed", ev.Message)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected dial_failed event")
+		}
+
+		snap := registry.Snapshot()
+		if snap.TotalConnections != 1 {
+			t.Errorf("TotalConnections = %d, want 1", snap.TotalConnections)
+		}
+		if snap.DialSuccesses != 0 {
+			t.Errorf("DialSuccesses = %d, want 0", snap.DialSuccesses)
+		}
+		if snap.DialFailures != 1 {
+			t.Errorf("DialFailures = %d, want 1", snap.DialFailures)
+		}
+		if snap.ActiveConnections != 0 {
+			t.Errorf("ActiveConnections = %d, want 0", snap.ActiveConnections)
+		}
+		if connReg.Count() != 0 {
+			t.Errorf("registry count = %d, want 0", connReg.Count())
+		}
+	})
+
+	t.Run("successful tunnel publishes connect and disconnect", func(t *testing.T) {
+		registry := stats.NewStatsRegistry()
+		connReg := stats.NewConnectionRegistry()
+		bus := stats.NewEventBus()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := bus.Subscribe(ctx, stats.EventConnect, stats.EventDisconnect, stats.EventDialFailed)
+
+		dnsTarget := common.Target{Network: "tcp", Protocol: common.ProtocolDNS, Host: "1.1.1.1", Port: 53}
+		upFrontend, upstream := net.Pipe()
+		t.Cleanup(func() { _ = upFrontend.Close(); _ = upstream.Close() })
+		backend := &dialBackend{
+			capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolDNS}},
+			conn:         upstream,
+			targets:      make(chan common.Target, 1),
+		}
+		dispatcher := &dispatcher{
+			backends: []common.Backend{backend},
+			fallback: commonFallback(),
+			dns:      &dnsTarget,
+			ctx:      ctx,
+			logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			name:     "tun-test",
+			stats:    registry,
+			connReg:  connReg,
+			bus:      bus,
+			shimBuf:  1024,
+		}
+
+		frontend, client := net.Pipe()
+		defer func() { _ = frontend.Close(); _ = client.Close() }()
+		go dispatcher.serveInterceptedDNSStream(frontend)
+
+		select {
+		case got := <-backend.targets:
+			if got != dnsTarget {
+				t.Fatalf("backend target = %#v, want %#v", got, dnsTarget)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("backend was not dialed")
+		}
+
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventConnect {
+				t.Fatalf("event type = %s, want connect", ev.Type)
+			}
+			if ev.Frontend != "tun-test" {
+				t.Errorf("frontend = %s, want tun-test", ev.Frontend)
+			}
+			if ev.RemoteAddr != "127.0.0.1" {
+				t.Errorf("RemoteAddr = %s, want 127.0.0.1", ev.RemoteAddr)
+			}
+			if connReg.Count() != 1 {
+				t.Errorf("registry count = %d, want 1", connReg.Count())
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected connect event")
+		}
+
+		// Exchange data through the tunnel to exercise byte counting.
+		clientWrite := []byte("hello upstream")
+		upRead := make(chan int, 1)
+		go func() {
+			n, _ := upFrontend.Read(make([]byte, len(clientWrite)))
+			upRead <- n
+		}()
+		if _, err := client.Write(clientWrite); err != nil {
+			t.Fatalf("client write: %v", err)
+		}
+		select {
+		case n := <-upRead:
+			if n != len(clientWrite) {
+				t.Errorf("upstream read %d bytes, want %d", n, len(clientWrite))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("upstream did not read data")
+		}
+
+		upWrite := []byte("hello client")
+		clientRead := make(chan int, 1)
+		go func() {
+			buf := make([]byte, len(upWrite))
+			n, _ := client.Read(buf)
+			clientRead <- n
+		}()
+		if _, err := upFrontend.Write(upWrite); err != nil {
+			t.Fatalf("upstream write: %v", err)
+		}
+		select {
+		case n := <-clientRead:
+			if n != len(upWrite) {
+				t.Errorf("client read %d bytes, want %d", n, len(upWrite))
+			}
+		case <-time.After(time.Second):
+			t.Fatal("client did not read data")
+		}
+
+		_ = client.Close()
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventDisconnect {
+				t.Fatalf("event type = %s, want disconnect", ev.Type)
+			}
+			if ev.RemoteAddr != "127.0.0.1" {
+				t.Errorf("disconnect RemoteAddr = %s, want 127.0.0.1", ev.RemoteAddr)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected disconnect event")
+		}
+
+		snap := registry.Snapshot()
+		if snap.TotalConnections != 1 {
+			t.Errorf("TotalConnections = %d, want 1", snap.TotalConnections)
+		}
+		if snap.DialSuccesses != 1 {
+			t.Errorf("DialSuccesses = %d, want 1", snap.DialSuccesses)
+		}
+		if snap.DialFailures != 0 {
+			t.Errorf("DialFailures = %d, want 0", snap.DialFailures)
+		}
+		if snap.ActiveConnections != 0 {
+			t.Errorf("ActiveConnections = %d, want 0", snap.ActiveConnections)
+		}
+		if snap.BytesIn != uint64(len(clientWrite)) {
+			t.Errorf("BytesIn = %d, want %d", snap.BytesIn, len(clientWrite))
+		}
+		if snap.BytesOut != uint64(len(upWrite)) {
+			t.Errorf("BytesOut = %d, want %d", snap.BytesOut, len(upWrite))
+		}
+		if connReg.Count() != 0 {
+			t.Errorf("registry count after disconnect = %d, want 0", connReg.Count())
+		}
+	})
+
+	t.Run("serveTCPConn uses frontend RemoteAddr", func(t *testing.T) {
+		registry := stats.NewStatsRegistry()
+		connReg := stats.NewConnectionRegistry()
+		bus := stats.NewEventBus()
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		ch := bus.Subscribe(ctx, stats.EventConnect, stats.EventDisconnect, stats.EventDialFailed)
+
+		upFrontend, upstream := net.Pipe()
+		t.Cleanup(func() { _ = upFrontend.Close(); _ = upstream.Close() })
+		backend := &dialBackend{
+			capabilities: []common.Capability{{Network: "tcp", Protocol: common.ProtocolAny}},
+			conn:         upstream,
+			targets:      make(chan common.Target, 1),
+		}
+		dispatcher := &dispatcher{
+			backends: []common.Backend{backend},
+			fallback: commonFallback(),
+			ctx:      ctx,
+			logger:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+			name:     "tun-test",
+			stats:    registry,
+			connReg:  connReg,
+			bus:      bus,
+			shimBuf:  1024,
+		}
+
+		frontend, client := net.Pipe()
+		defer func() { _ = frontend.Close(); _ = client.Close() }()
+		go dispatcher.serveTCPConn(frontend, common.Target{Network: "tcp", Host: "203.0.113.9", Port: 80}, remoteAddrFromConn(frontend), false)
+
+		select {
+		case got := <-backend.targets:
+			want := common.Target{Network: "tcp", Protocol: common.ProtocolUnknown, Host: "203.0.113.9", Port: 80}
+			if got != want {
+				t.Fatalf("backend target = %#v, want %#v", got, want)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("backend was not dialed")
+		}
+
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventConnect {
+				t.Fatalf("event type = %s, want connect", ev.Type)
+			}
+			if ev.RemoteAddr != frontend.RemoteAddr().String() {
+				t.Errorf("RemoteAddr = %s, want %s", ev.RemoteAddr, frontend.RemoteAddr().String())
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected connect event")
+		}
+
+		_ = client.Close()
+		select {
+		case ev := <-ch:
+			if ev.Type != stats.EventDisconnect {
+				t.Fatalf("event type = %s, want disconnect", ev.Type)
+			}
+		case <-time.After(time.Second):
+			t.Fatal("expected disconnect event")
+		}
+
+		snap := registry.Snapshot()
+		if snap.TotalConnections != 0 {
+			t.Errorf("TotalConnections = %d, want 0 (entry is in HandleTCP)", snap.TotalConnections)
+		}
+		if snap.DialSuccesses != 1 {
+			t.Errorf("DialSuccesses = %d, want 1", snap.DialSuccesses)
+		}
+		if snap.ActiveConnections != 0 {
+			t.Errorf("ActiveConnections = %d, want 0", snap.ActiveConnections)
 		}
 	})
 }
