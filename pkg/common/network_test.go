@@ -18,10 +18,10 @@ func TestNormalizeListenAddress(t *testing.T) {
 		{"ipv4 dotted quad", "0.0.0.0", "0.0.0.0", false},
 		{"ipv4 leading zeros", "127.000.000.001", "", true},
 		{"bare ipv6", "::1", "", true},
-		{"bracketed ipv6", "[::1]", "::1", false},
+		{"bracketed ipv6", "[::1]", "[::1]", false},
 		{"full ipv6", "2001:db8::1", "", true},
-		{"bracketed full ipv6", "[2001:db8::1]", "2001:db8::1", false},
-		{"unspecified ipv6", "[::]", "::", false},
+		{"bracketed full ipv6", "[2001:db8::1]", "[2001:db8::1]", false},
+		{"unspecified ipv6", "[::]", "[::]", false},
 		{"ipv6 with port", "[::1]:8080", "", true},
 		{"unclosed bracket left", "[::1", "", true},
 		{"unclosed bracket right", "::1]", "", true},
@@ -90,7 +90,10 @@ func TestNormalizeListenAddressCanonicalizesIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	ip, err := netip.ParseAddr(addr)
+	if addr != "[2001:db8::1]" {
+		t.Fatalf("got %q, want [2001:db8::1]", addr)
+	}
+	ip, err := netip.ParseAddr(addr[1 : len(addr)-1])
 	if err != nil {
 		t.Fatalf("result %q is not a valid IP: %v", addr, err)
 	}
