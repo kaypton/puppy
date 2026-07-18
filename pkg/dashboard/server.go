@@ -26,7 +26,6 @@ import (
 
 // ServerConfiguration configures the dashboard HTTP API server.
 type ServerConfiguration struct {
-	// ListenAddress is the bind address for the dashboard listener.
 	ListenAddress string
 	// ListenPort is the bind port for the dashboard listener.
 	ListenPort uint16
