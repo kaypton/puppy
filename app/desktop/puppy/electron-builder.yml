@@ -16,6 +16,8 @@ extraResources:
     to: bin
     filter:
       - 'puppy-server-*'
+  - from: config.toml
+    to: config.toml
 mac:
   entitlementsInherit: build/entitlements.mac.plist
   extendInfo:

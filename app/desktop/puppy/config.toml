@@ -1,0 +1,64 @@
+frontend = "local_http_proxy"
+
+[frontends.local_http_proxy]
+type = "httpproxy"
+listen_address = "127.0.0.1"
+listen_port = 8848
+tls_cert_file = "./certs/proxy-cert.pem"
+tls_key_file = "./certs/proxy-key.pem"
+username = "test"
+password = "test12345"
+camouflage = true
+camouflage_method = "return-404"
+backend = "direct_out"
+shim = "default_tunnel"
+
+[backends.direct_out]
+type = "direct"
+
+[backends.upstream_http_proxy]
+type = "httpproxy"
+proxy_address = "127.0.0.1:3128"
+username = ""
+password = ""
+tls = false
+
+[backends.upstream_socks_proxy]
+type = "socksproxy"
+proxy_address = "127.0.0.1:1080"
+username = ""
+password = ""
+tls = false
+
+[frontends.local_socks_proxy]
+type = "socksproxy"
+listen_address = "127.0.0.1"
+listen_port = 1080
+username = "test"
+password = "test12345"
+backend = "direct_out"
+shim = "default_tunnel"
+
+[frontends.local_tun]
+type = "tun"
+device_name = ""
+ipv4_address = "10.0.0.1/24"
+mtu = 1500
+auto_route = true
+udp_idle_timeout = 30
+backends = ["direct_out"]
+fallback = "direct_out"
+protocol_detect_timeout = 1
+protocol_detect_max_bytes = 16384
+shim = "default_tunnel"
+
+[shims.default_tunnel]
+buffer_size = 32768
+
+[dashboard]
+enabled = true
+listen_address = "127.0.0.1"
+listen_port = 8443
+tls_cert_file = "./certs/proxy-cert.pem"
+tls_key_file = "./certs/proxy-key.pem"
+token = "puppy-dashboard-secret"
