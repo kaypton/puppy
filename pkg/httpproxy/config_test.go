@@ -34,16 +34,47 @@ func TestConfigurationValidate(t *testing.T) {
 		{"unknown camouflage method", func(c *Configuration) { c.CamouflageMethod = "unknown" }, "camouflage_method"},
 		{"missing backend", func(c *Configuration) { c.Backend = "" }, "backend reference"},
 		{"missing shim", func(c *Configuration) { c.Shim = "" }, "shim reference"},
+		{"bracketed ipv6", func(c *Configuration) { c.ListenAddress = "[2001:db8::1]" }, ""},
+		{"bare ipv6", func(c *Configuration) { c.ListenAddress = "2001:db8::1" }, "must be wrapped in brackets"},
+		{"ipv4 with port", func(c *Configuration) { c.ListenAddress = "127.0.0.1:8080" }, "must be wrapped in brackets"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			config := valid
 			test.change(&config)
 			err := config.Validate()
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("error = %v, want substring %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestConfigurationNormalize(t *testing.T) {
+	config := Configuration{
+		ListenAddress: "[2001:0DB8:0000:0000:0000:0000:0000:0001]",
+		ListenPort:    8080,
+		Backend:       "out",
+		Shim:          "tunnel",
+	}
+	if err := config.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if config.ListenAddress != "2001:db8::1" {
+		t.Fatalf("ListenAddress = %q, want 2001:db8::1", config.ListenAddress)
+	}
+}
+
+func TestConfigurationNormalize_IPv4WithPort(t *testing.T) {
+	config := Configuration{ListenAddress: "127.0.0.1:8080"}
+	if err := config.Normalize(); err == nil || !strings.Contains(err.Error(), "must be wrapped in brackets") {
+		t.Fatalf("expected IPv4 with port to be rejected, got error = %v", err)
 	}
 }
 

@@ -460,7 +460,7 @@ backend = "direct_out"`,
 		{
 			name:    "invalid unused proxy address",
 			config:  strings.Replace(validConfiguration, `proxy_address = "proxy.example.com:3128"`, `proxy_address = "proxy.example.com"`, 1),
-			wantErr: `backend "corporate_proxy": proxy_address must be in host:port form`,
+			wantErr: `backend "corporate_proxy": proxy address must be in host:port form`,
 		},
 		{
 			name:    "negative unused shim buffer",
