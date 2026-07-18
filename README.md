@@ -23,15 +23,103 @@ Puppy 是一个用 Go 编写的代理服务，支持三种工作模式：
 
 需要 Go 1.24+。依赖已 vendored，无需联网。
 
-```bash
-make build              # 生成 bin/puppy-server
-```
-
-也可以直接：
+### 编译服务端二进制
 
 ```bash
-go build -mod=vendor -trimpath -o bin/puppy-server ./cmd/puppy-server
+make build              # 生成 bin/puppy-server-<os>-<arch>
 ```
+
+`make build` 会根据当前宿主操作系统和架构生成带 OS/arch 后缀的二进制，例如：
+
+- Linux x86_64 → `bin/puppy-server-linux-x64`
+- Linux aarch64 → `bin/puppy-server-linux-arm64`
+- macOS x86_64 → `bin/puppy-server-darwin-x64`
+- macOS Apple Silicon → `bin/puppy-server-darwin-arm64`
+
+### 使用 Makefile 交叉编译服务端二进制
+
+所有交叉编译都通过设置 `GOOS`/`GOARCH` 完成。Makefile 固定使用 `-mod=vendor`，无需额外参数。
+
+```bash
+# Linux amd64
+GOOS=linux GOARCH=amd64 make build
+
+# Linux arm64
+GOOS=linux GOARCH=arm64 make build
+
+# macOS amd64
+GOOS=darwin GOARCH=amd64 make build
+
+# macOS arm64 (Apple Silicon)
+GOOS=darwin GOARCH=arm64 make build
+```
+
+交叉编译产物同样按 Node 风格命名为 `puppy-server-<os>-<arch>`，例如 `GOOS=linux GOARCH=amd64` 输出 `bin/puppy-server-linux-x64`，`GOOS=darwin GOARCH=arm64` 输出 `bin/puppy-server-darwin-arm64`。`make build` 使用 `GOARCH` 原始值（`amd64`/`arm64`）来映射到 `DESKTOP_ARCH`（`x64`/`arm64`）。
+
+TUN 模式依赖 `gvisor.dev/gvisor`，在 Linux 上本机构建即可；交叉编译到非 Linux 目标时通常不影响 HTTP/SOCKS 前端。
+
+### 编译 Electron 桌面应用
+
+桌面应用代码位于 `app/desktop/puppy`，是一个 Electron + Vite + React 项目。需要 Node.js 20+ 和 npm。
+
+```bash
+# 安装桌面应用依赖（首次构建前必须执行）
+make desktop-deps
+
+# 只编译桌面应用的前端/主进程/预加载脚本，不打包
+make desktop-build
+
+# 为当前宿主系统构建桌面安装包（仅 Linux 和 macOS，默认使用宿主架构）
+make desktop-package
+
+# 为 Linux 构建安装包，默认使用宿主架构；在 x64 上交叉编译 arm64 时指定 DESKTOP_ARCH
+make desktop-package-linux
+make desktop-package-linux DESKTOP_ARCH=arm64
+
+# 为 macOS 构建安装包，默认使用宿主架构；在 x64 上交叉编译 Apple Silicon 时指定 DESKTOP_ARCH
+make desktop-package-mac
+make desktop-package-mac DESKTOP_ARCH=arm64
+
+# 在 Apple Silicon 上为 x64 构建 macOS 安装包
+make desktop-package-mac DESKTOP_ARCH=x64
+```
+
+打包时会自动将对应 OS/arch 的 `puppy-server` 二进制一起嵌入安装包（位于 `resources/bin/puppy-server-<os>-<arch>`），桌面应用在运行时会通过 `process.resourcesPath` 找到它。
+
+### 常用 Make 目标速查
+
+| 目标 | 说明 |
+|------|------|
+| `make build` | 编译当前宿主 OS/arch 的服务端二进制 |
+| `make run CONFIG=./config.toml` | 编译并运行服务端 |
+| `make test` | 运行所有 Go 测试 |
+| `make test-race` | 带 race 检测运行测试 |
+| `make test-cover` | 运行测试并输出 `coverage.out` |
+| `make check` | 运行 `test` + `vet` |
+| `make fmt` | 格式化所有 Go 文件 |
+| `make vet` | 运行 `go vet` |
+| `make vendor` | 同步 `vendor/` 依赖 |
+| `make clean` | 清理 `bin/`、`coverage.out` 和桌面构建产物 |
+| `make desktop-deps` | 安装桌面应用 npm 依赖 |
+| `make desktop-build` | 编译桌面应用渲染/主进程/预加载脚本 |
+| `make desktop-package` | 为当前宿主系统打包桌面应用（默认使用宿主架构） |
+| `make desktop-package-linux` | 为 Linux 打包桌面应用（默认使用宿主架构，可覆盖 `DESKTOP_ARCH`） |
+| `make desktop-package-mac` | 为 macOS 打包桌面应用（默认使用宿主架构，可覆盖 `DESKTOP_ARCH`） |
+| `make desktop-clean` | 清理桌面应用 `dist/` 和打包用的二进制 |
+| `make help` | 列出所有可用目标 |
+
+### 桌面打包加速与排错
+
+- Electron 二进制下载较慢，可在安装依赖时设置国内镜像：
+  ```bash
+  ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ make desktop-deps
+  ```
+- 只想验证打包产物结构而不生成完整安装包，可追加 `ELECTRON_BUILDER_ARGS=--dir`：
+  ```bash
+  make desktop-package-linux ELECTRON_BUILDER_ARGS=--dir
+  ```
+  输出目录为 `app/desktop/puppy/dist/linux-unpacked`（Linux）或 `app/desktop/puppy/dist/mac`（macOS）。
+- 桌面打包产物（`app/desktop/puppy/dist/`、`app/desktop/puppy/bin/`）已被 `.gitignore` 忽略，无需提交。
 
 ## 快速开始
 
@@ -417,7 +505,7 @@ bin/puppy-server --config ./config.toml     # 启动（-c 是 --config 的简写
 开发与测试：
 
 ```bash
-make build           # 编译 bin/puppy-server
+make build           # 编译当前宿主 OS/arch 的 bin/puppy-server-<os>-<arch>
 make run CONFIG=./config.toml   # 编译并运行
 make test            # 单元测试与回环集成测试
 make test-race       # 带 race 检测
@@ -425,8 +513,20 @@ make test-cover      # 输出 coverage.out
 make check           # test + vet
 make fmt             # 格式化
 make vendor          # 重新同步 vendor/
-make clean           # 清理 bin/ 与 coverage.out
+make clean           # 清理 bin/、coverage.out 和桌面构建产物
 ```
+
+桌面应用打包：
+
+```bash
+make desktop-deps              # 安装桌面应用 npm 依赖
+make desktop-build             # 编译桌面应用，不打包
+make desktop-package           # 为当前宿主系统打包（默认使用宿主架构）
+make desktop-package-linux     # 为 Linux 打包（默认使用宿主架构；x64 上交叉编译 arm64 时加 DESKTOP_ARCH=arm64）
+make desktop-package-mac       # 为 macOS 打包（默认使用宿主架构；x64 上交叉编译 Apple Silicon 时加 DESKTOP_ARCH=arm64）
+make desktop-clean             # 清理桌面构建产物
+```
+
 
 ## 平台支持与权限
 
