@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 
+	"github.com/puppy/pkg/common"
 	"github.com/puppy/pkg/common/stats"
 )
 
@@ -27,12 +28,30 @@ func (c *Configuration) Validate() error {
 	if c.ListenAddress == "" {
 		return errors.New("dashboard: listen_address is required when enabled")
 	}
+	normalized, err := common.NormalizeListenAddress(c.ListenAddress)
+	if err != nil {
+		return err
+	}
+	c.ListenAddress = normalized
 	if c.ListenPort == 0 {
 		return errors.New("dashboard: listen_port is required when enabled")
 	}
 	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
 		return errors.New("dashboard: tls_cert_file and tls_key_file must both be set or both be empty")
 	}
+	return nil
+}
+
+// Normalize canonicalizes the configuration values in place.
+func (c *Configuration) Normalize() error {
+	if !c.Enabled || c.ListenAddress == "" {
+		return nil
+	}
+	normalized, err := common.NormalizeListenAddress(c.ListenAddress)
+	if err != nil {
+		return err
+	}
+	c.ListenAddress = normalized
 	return nil
 }
 

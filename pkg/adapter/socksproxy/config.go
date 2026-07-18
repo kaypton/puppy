@@ -2,10 +2,9 @@ package socksproxy
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
-	"net"
-	"strconv"
+
+	"github.com/puppy/pkg/common"
 )
 
 // Type identifies the SOCKS5 proxy backend in a named configuration group.
@@ -37,16 +36,8 @@ func (c Configuration) Validate() error {
 	if c.ProxyAddress == "" {
 		return errors.New("proxy_address is required")
 	}
-	host, portText, err := net.SplitHostPort(c.ProxyAddress)
-	if err != nil {
-		return fmt.Errorf("proxy_address must be in host:port form: %w", err)
-	}
-	if host == "" {
-		return errors.New("proxy_address host is required")
-	}
-	port, err := strconv.ParseUint(portText, 10, 16)
-	if err != nil || port == 0 {
-		return errors.New("proxy_address port must be between 1 and 65535")
+	if _, err := common.NormalizeProxyAddress(c.ProxyAddress); err != nil {
+		return err
 	}
 	if (c.Username == "") != (c.Password == "") {
 		return errors.New("username and password must both be set or both be empty")
@@ -59,6 +50,19 @@ func (c Configuration) Validate() error {
 	if c.TLSInsecureSkipVerify && c.TLSCAFile != "" {
 		return errors.New("tls_insecure_skip_verify and tls_ca_file are mutually exclusive")
 	}
+	return nil
+}
+
+// Normalize canonicalizes the configuration values in place.
+func (c *Configuration) Normalize() error {
+	if c.ProxyAddress == "" {
+		return nil
+	}
+	normalized, err := common.NormalizeProxyAddress(c.ProxyAddress)
+	if err != nil {
+		return err
+	}
+	c.ProxyAddress = normalized
 	return nil
 }
 

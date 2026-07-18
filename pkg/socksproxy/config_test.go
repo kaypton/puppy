@@ -33,16 +33,39 @@ func TestConfigurationValidate(t *testing.T) {
 		{"unpaired credentials", func(c *Configuration) { c.Username = "alice" }, "username and password"},
 		{"missing backend", func(c *Configuration) { c.Backend = "" }, "backend reference"},
 		{"missing shim", func(c *Configuration) { c.Shim = "" }, "shim reference"},
+		{"bracketed ipv6", func(c *Configuration) { c.ListenAddress = "[::1]" }, ""},
+		{"bare ipv6", func(c *Configuration) { c.ListenAddress = "::1" }, "must be wrapped in brackets"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			config := valid
 			test.change(&config)
 			err := config.Validate()
+			if test.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
 			if err == nil || !strings.Contains(err.Error(), test.wantErr) {
 				t.Fatalf("error = %v, want substring %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestConfigurationNormalize(t *testing.T) {
+	config := Configuration{
+		ListenAddress: "[2001:0DB8:0000:0000:0000:0000:0000:0001]",
+		ListenPort:    1080,
+		Backend:       "out",
+		Shim:          "tunnel",
+	}
+	if err := config.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if config.ListenAddress != "2001:db8::1" {
+		t.Fatalf("ListenAddress = %q, want 2001:db8::1", config.ListenAddress)
 	}
 }
 

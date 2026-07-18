@@ -330,11 +330,17 @@ func loadConfiguration(path string) (*configuration, error) {
 			if err := metadata.PrimitiveDecode(primitive, &frontendConfig); err != nil {
 				return nil, fmt.Errorf("decode frontend %q: %w", name, err)
 			}
+			if err := frontendConfig.Normalize(); err != nil {
+				return nil, fmt.Errorf("normalize frontend %q: %w", name, err)
+			}
 			config.Frontends[name] = frontendGroup{Type: kind.Type, Configuration: frontendConfig}
 		case frontendsocksproxy.Type:
 			var frontendConfig frontendsocksproxy.Configuration
 			if err := metadata.PrimitiveDecode(primitive, &frontendConfig); err != nil {
 				return nil, fmt.Errorf("decode frontend %q: %w", name, err)
+			}
+			if err := frontendConfig.Normalize(); err != nil {
+				return nil, fmt.Errorf("normalize frontend %q: %w", name, err)
 			}
 			config.Frontends[name] = frontendGroup{Type: kind.Type, Configuration: frontendConfig}
 		case frontendtunproxy.Type:
@@ -366,11 +372,17 @@ func loadConfiguration(path string) (*configuration, error) {
 			if err := metadata.PrimitiveDecode(primitive, &backendConfig); err != nil {
 				return nil, fmt.Errorf("decode backend %q: %w", name, err)
 			}
+			if err := backendConfig.Normalize(); err != nil {
+				return nil, fmt.Errorf("normalize backend %q: %w", name, err)
+			}
 			config.Backends[name] = backendGroup{Type: kind.Type, Configuration: backendConfig}
 		case adaptersocksproxy.Type:
 			var backendConfig adaptersocksproxy.Configuration
 			if err := metadata.PrimitiveDecode(primitive, &backendConfig); err != nil {
 				return nil, fmt.Errorf("decode backend %q: %w", name, err)
+			}
+			if err := backendConfig.Normalize(); err != nil {
+				return nil, fmt.Errorf("normalize backend %q: %w", name, err)
 			}
 			config.Backends[name] = backendGroup{Type: kind.Type, Configuration: backendConfig}
 		default:
@@ -385,6 +397,12 @@ func loadConfiguration(path string) (*configuration, error) {
 			return nil, fmt.Errorf("decode shim %q: %w", name, err)
 		}
 		config.Shims[name] = shimConfig
+	}
+
+	if config.Dashboard != nil {
+		if err := config.Dashboard.Normalize(); err != nil {
+			return nil, fmt.Errorf("normalize dashboard: %w", err)
+		}
 	}
 
 	if undecoded := metadata.Undecoded(); len(undecoded) > 0 {

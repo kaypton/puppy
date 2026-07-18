@@ -2,6 +2,7 @@ package httpproxy
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 
 	"github.com/puppy/pkg/common"
@@ -31,6 +32,9 @@ func (c Configuration) Validate() error {
 	if c.ListenAddress == "" {
 		return errors.New("listen_address is required")
 	}
+	if _, err := common.NormalizeListenAddress(c.ListenAddress); err != nil {
+		return err
+	}
 	if c.ListenPort == 0 {
 		return errors.New("listen_port is required")
 	}
@@ -40,8 +44,8 @@ func (c Configuration) Validate() error {
 	if (c.Username == "") != (c.Password == "") {
 		return errors.New("username and password must both be set or both be empty")
 	}
-	if method := normalizeCamouflageMethod(c.CamouflageMethod); method != Return404 {
-		return errors.New("camouflage_method must be return-404 or empty")
+	if c.CamouflageMethod != "" && c.CamouflageMethod != Return404 {
+		return fmt.Errorf("camouflage_method %q is not supported", c.CamouflageMethod)
 	}
 	if c.Backend == "" {
 		return errors.New("backend reference is required")
@@ -49,6 +53,19 @@ func (c Configuration) Validate() error {
 	if c.Shim == "" {
 		return errors.New("shim reference is required")
 	}
+	return nil
+}
+
+// Normalize canonicalizes the configuration values in place.
+func (c *Configuration) Normalize() error {
+	if c.ListenAddress == "" {
+		return nil
+	}
+	normalized, err := common.NormalizeListenAddress(c.ListenAddress)
+	if err != nil {
+		return err
+	}
+	c.ListenAddress = normalized
 	return nil
 }
 

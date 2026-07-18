@@ -22,6 +22,9 @@ func TestConfigurationValidate(t *testing.T) {
 		{"missing address", Configuration{}, "proxy_address is required"},
 		{"missing port", Configuration{ProxyAddress: "proxy.example.com"}, "host:port"},
 		{"zero port", Configuration{ProxyAddress: "proxy.example.com:0"}, "between 1 and 65535"},
+		{"bracketed ipv6", Configuration{ProxyAddress: "[2001:db8::1]:3128"}, ""},
+		{"bare ipv6", Configuration{ProxyAddress: "2001:db8::1:3128"}, "host:port"},
+		{"uppercase ipv6", Configuration{ProxyAddress: "[2001:DB8::1]:3128"}, ""},
 		{"unpaired credentials", Configuration{ProxyAddress: "proxy.example.com:3128", Username: "alice"}, "username and password"},
 		{"ca file without tls", Configuration{ProxyAddress: "proxy.example.com:3128", TLSCAFile: "./certs/ca-cert.pem"}, "require tls = true"},
 		{"server name without tls", Configuration{ProxyAddress: "proxy.example.com:3128", TLSServerName: "proxy.internal"}, "require tls = true"},
@@ -41,6 +44,16 @@ func TestConfigurationValidate(t *testing.T) {
 				t.Fatalf("error = %v, want substring %q", err, test.wantErr)
 			}
 		})
+	}
+}
+
+func TestConfigurationNormalize(t *testing.T) {
+	config := Configuration{ProxyAddress: "[2001:0DB8:0000:0000:0000:0000:0000:0001]:3128"}
+	if err := config.Normalize(); err != nil {
+		t.Fatalf("Normalize: %v", err)
+	}
+	if config.ProxyAddress != "[2001:db8::1]:3128" {
+		t.Fatalf("ProxyAddress = %q, want [2001:db8::1]:3128", config.ProxyAddress)
 	}
 }
 

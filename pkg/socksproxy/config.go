@@ -36,6 +36,9 @@ func (c Configuration) Validate() error {
 	if c.ListenAddress == "" {
 		return errors.New("listen_address is required")
 	}
+	if _, err := common.NormalizeListenAddress(c.ListenAddress); err != nil {
+		return err
+	}
 	if c.ListenPort == 0 {
 		return errors.New("listen_port is required")
 	}
@@ -51,6 +54,19 @@ func (c Configuration) Validate() error {
 	if c.Shim == "" {
 		return errors.New("shim reference is required")
 	}
+	return nil
+}
+
+// Normalize canonicalizes the configuration values in place.
+func (c *Configuration) Normalize() error {
+	if c.ListenAddress == "" {
+		return nil
+	}
+	normalized, err := common.NormalizeListenAddress(c.ListenAddress)
+	if err != nil {
+		return err
+	}
+	c.ListenAddress = normalized
 	return nil
 }
 
