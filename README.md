@@ -375,7 +375,7 @@ frontend = "local_http_proxy"      # 必填：选择启动哪个前端组
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `type` | 是 | 固定为 `httpproxy` |
-| `listen_address` | 是 | 监听 IP。`127.0.0.1` 仅本机；`0.0.0.0` 接受外部连接 |
+| `listen_address` | 是 | 监听 IP。`127.0.0.1` 仅本机；`0.0.0.0` 接受外部连接。IPv6 写裸地址，如 `::1` 或 `2001:db8::1` |
 | `listen_port` | 是 | 监听端口，1–65535 |
 | `tls_cert_file` | 否 | 启用 HTTPS 代理时填证书文件路径，需与 `tls_key_file` 同时配置 |
 | `tls_key_file` | 否 | 启用 HTTPS 代理时填私钥文件路径 |
@@ -393,7 +393,7 @@ SOCKS5 代理前端，仅支持 CONNECT 命令（TCP）。认证方式为 RFC 19
 | 字段 | 必填 | 说明 |
 |------|------|------|
 | `type` | 是 | 固定为 `socksproxy` |
-| `listen_address` | 是 | 监听 IP。`127.0.0.1` 仅本机；`0.0.0.0` 接受外部连接 |
+| `listen_address` | 是 | 监听 IP。`127.0.0.1` 仅本机；`0.0.0.0` 接受外部连接。IPv6 写裸地址，如 `::1` 或 `2001:db8::1` |
 | `listen_port` | 是 | 监听端口，1–65535 |
 | `tls_cert_file` | 否 | 启用 SOCKS5-over-TLS 时填证书文件路径，需与 `tls_key_file` 同时配置 |
 | `tls_key_file` | 否 | 启用 SOCKS5-over-TLS 时填私钥文件路径 |

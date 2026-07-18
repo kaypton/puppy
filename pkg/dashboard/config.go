@@ -21,18 +21,16 @@ type Configuration struct {
 
 // Validate checks the dashboard configuration fields. Validation is skipped
 // when the dashboard is disabled.
-func (c *Configuration) Validate() error {
+func (c Configuration) Validate() error {
 	if !c.Enabled {
 		return nil
 	}
 	if c.ListenAddress == "" {
 		return errors.New("dashboard: listen_address is required when enabled")
 	}
-	normalized, err := common.NormalizeListenAddress(c.ListenAddress)
-	if err != nil {
+	if _, err := common.NormalizeListenAddress(c.ListenAddress); err != nil {
 		return err
 	}
-	c.ListenAddress = normalized
 	if c.ListenPort == 0 {
 		return errors.New("dashboard: listen_port is required when enabled")
 	}
