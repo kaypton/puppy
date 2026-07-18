@@ -49,7 +49,7 @@ func TestConfigurationNormalize(t *testing.T) {
 	if err := cfg.Normalize(); err != nil {
 		t.Fatalf("Normalize: %v", err)
 	}
-	if cfg.ListenAddress != "2001:db8::1" {
-		t.Fatalf("ListenAddress = %q, want 2001:db8::1", cfg.ListenAddress)
+	if cfg.ListenAddress != "[2001:db8::1]" {
+		t.Fatalf("ListenAddress = %q, want [2001:db8::1]", cfg.ListenAddress)
 	}
 }

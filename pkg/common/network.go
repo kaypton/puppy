@@ -11,12 +11,11 @@ import (
 // NormalizeListenAddress validates and canonicalizes an address intended for
 // net.Listen("tcp", net.JoinHostPort(addr, port)). It accepts hostnames and
 // IPv4 literals as-is, and requires bracketed IPv6 literals (e.g. "[::1]").
-// The returned address is a canonical form suitable for storage and
-// comparison: hostnames and IPv4 are returned as-is, IPv6 is returned as the
-// standard compressed form without brackets. An error is returned for empty
-// strings, bare IPv6 literals, invalid addresses, bracketed IPv4, bracketed
-// addresses with ports, unclosed brackets, IPv4 leading zeros, IPv4-mapped
-// IPv6, or IPv6 zone identifiers.
+// The returned address preserves the original input form: hostnames and IPv4
+// are returned as-is, IPv6 is returned with the original brackets. An error
+// is returned for empty strings, bare IPv6 literals, invalid addresses,
+// bracketed IPv4, bracketed addresses with ports, unclosed brackets, IPv4
+// leading zeros, IPv4-mapped IPv6, or IPv6 zone identifiers.
 func NormalizeListenAddress(addr string) (string, error) {
 	if addr == "" {
 		return "", fmt.Errorf("listen address is required")
@@ -39,7 +38,7 @@ func NormalizeListenAddress(addr string) (string, error) {
 		if ip.Is4() {
 			return "", fmt.Errorf("listen address must not wrap IPv4 in brackets")
 		}
-		return ip.String(), nil
+		return fmt.Sprintf("[%s]", ip.String()), nil
 	}
 
 	if strings.Contains(addr, ":") {
