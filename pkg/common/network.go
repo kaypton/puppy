@@ -9,25 +9,25 @@ import (
 )
 
 // NormalizeListenAddress validates and canonicalizes an address intended for
-// net.Listen("tcp", net.JoinHostPort(addr, port)). It accepts hostnames and
-// IPv4 literals as-is, and requires bracketed IPv6 literals (e.g. "[::1]").
-// The returned address preserves the original input form: hostnames and IPv4
-// are returned as-is, IPv6 is returned with the original brackets. An error
-// is returned for empty strings, bare IPv6 literals, invalid addresses,
-// bracketed IPv4, bracketed addresses with ports, unclosed brackets, IPv4
-// leading zeros, IPv4-mapped IPv6, or IPv6 zone identifiers.
+// net.Listen("tcp", net.JoinHostPort(addr, port)). It accepts hostnames,
+// IPv4 literals, and bare IPv6 literals (e.g. "::1"). Because the port is
+// provided separately in the configuration, bracketed IPv6 is rejected. The
+// returned address is the bare host or IP; IPv6 is returned in canonicalized
+// form such as "::1" or "2001:db8::1". An error is returned for empty strings,
+// invalid addresses, bracketed addresses (with or without ports), hostnames
+// that contain colons, IPv4 leading zeros, IPv4-mapped IPv6, or IPv6 zone
+// identifiers.
 func NormalizeListenAddress(addr string) (string, error) {
 	if addr == "" {
 		return "", fmt.Errorf("listen address is required")
 	}
 	if strings.Contains(addr, "]") || strings.Contains(addr, "[") {
-		if len(addr) < 2 || addr[0] != '[' || addr[len(addr)-1] != ']' {
-			return "", fmt.Errorf("listen address %q has unclosed brackets", addr)
-		}
-		ipStr := addr[1 : len(addr)-1]
-		ip, err := netip.ParseAddr(ipStr)
+		return "", fmt.Errorf("listen address must not contain brackets; use bare IPv6 such as %s", strings.Trim(addr, "[]"))
+	}
+	if strings.Contains(addr, ":") {
+		ip, err := netip.ParseAddr(addr)
 		if err != nil {
-			return "", fmt.Errorf("listen address %q is not a valid IPv6 address: %w", addr, err)
+			return "", fmt.Errorf("listen address %q is not a valid IPv6 address", addr)
 		}
 		if ip.Zone() != "" {
 			return "", fmt.Errorf("listen address must not contain an IPv6 zone")
@@ -36,13 +36,9 @@ func NormalizeListenAddress(addr string) (string, error) {
 			return "", fmt.Errorf("listen address must not be an IPv4-mapped IPv6 address")
 		}
 		if ip.Is4() {
-			return "", fmt.Errorf("listen address must not wrap IPv4 in brackets")
+			return "", fmt.Errorf("listen address IPv6 must be wrapped in brackets, e.g. [%s]", addr)
 		}
-		return fmt.Sprintf("[%s]", ip.String()), nil
-	}
-
-	if strings.Contains(addr, ":") {
-		return "", fmt.Errorf("listen address IPv6 must be wrapped in brackets, e.g. [%s]", addr)
+		return ip.String(), nil
 	}
 
 	if ip, err := netip.ParseAddr(addr); err == nil {
