@@ -52,7 +52,8 @@ GO_SOURCES := $(shell find . -type f -name '*.go' -not -path './vendor/*' -not -
 
 .PHONY: build clean vendor test test-race test-cover run fmt vet check help \
 	desktop-deps desktop-build desktop-package desktop-clean \
-	desktop-package-mac desktop-package-linux
+	desktop-package-mac desktop-package-linux \
+	tui-build tui-check
 
 build: $(BINARY_PATH) ## Build the puppy-server binary.
 
@@ -125,3 +126,15 @@ desktop-package-mac: ## Build the desktop app for macOS. Defaults to the host ar
 
 desktop-package-linux: ## Build the desktop app for Linux. Defaults to the host architecture; set DESKTOP_ARCH=... to override.
 	$(MAKE) desktop-package DESKTOP_OS=linux DESKTOP_ARCH=$(DESKTOP_ARCH)
+
+# ---------------------------------------------------------------------------
+# Terminal UI (app/tui)
+# ---------------------------------------------------------------------------
+
+TUI_DIR := app/tui
+
+tui-build: ## Build the puppy-tui terminal UI (release binary in app/tui/target/release).
+	$(MAKE) -C $(TUI_DIR) build
+
+tui-check: ## Run the terminal UI validation suite (tests, clippy, fmt).
+	$(MAKE) -C $(TUI_DIR) check
