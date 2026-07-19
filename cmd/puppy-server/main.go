@@ -144,18 +144,20 @@ func runServer(ctx context.Context, configPath string) error {
 	dashErrCh := make(chan error, 1)
 	go func() { dashErrCh <- dashServer.Run(dashCtx) }()
 
-	// Start the frontend in a goroutine via frontendManager.
+	// Start the frontend in a goroutine via frontendManager. The manager
+	// watches the frontend itself so a reload does not race with the
+	// supervisor for the frontend's exit value.
 	feCtx, feCancel := context.WithCancel(ctx)
-	feErrCh := make(chan error, 1)
-	go func() { feErrCh <- frontend.Run(feCtx) }()
-
+	feDone := make(chan struct{})
 	feMgr := &frontendManager{
 		ctx:       ctx,
 		logger:    logger,
 		statsDeps: statsDeps,
 		cancel:    feCancel,
-		errCh:     feErrCh,
+		done:      feDone,
+		exit:      make(chan struct{}),
 	}
+	go feMgr.watch(frontend, feCtx, feDone)
 
 	// Control loop: process control requests serially.
 	var wg sync.WaitGroup
@@ -176,11 +178,13 @@ func runServer(ctx context.Context, configPath string) error {
 	}()
 
 	// Wait for either the frontend or dashboard to exit, then shut down the
-	// other.
+	// other. The frontend is watched through feMgr.Exit(), which only fires
+	// when the frontend dies on its own (a reload swaps in a fresh frontend
+	// without triggering it).
 	var firstErr error
 	select {
-	case err := <-feErrCh:
-		firstErr = err
+	case <-feMgr.Exit():
+		firstErr = feMgr.ExitErr()
 		dashCancel()
 	case err := <-dashErrCh:
 		firstErr = err
@@ -190,12 +194,16 @@ func runServer(ctx context.Context, configPath string) error {
 		dashCancel()
 	}
 
-	// Wait for both to finish.
-	if feErr := <-feErrCh; feErr != nil && firstErr == nil {
-		firstErr = feErr
-	}
+	// Wait for the dashboard to finish; the frontend either already exited
+	// (Exit fired) or is shutting down via feCancel. In the latter case,
+	// waiting on Exit ensures the watcher has run to completion before we
+	// return.
 	if dashErr := <-dashErrCh; dashErr != nil && firstErr == nil {
 		firstErr = dashErr
+	}
+	<-feMgr.Exit()
+	if feErr := feMgr.ExitErr(); feErr != nil && firstErr == nil {
+		firstErr = feErr
 	}
 	wg.Wait()
 	bus.Close()
@@ -210,7 +218,56 @@ type frontendManager struct {
 	logger    *slog.Logger
 	statsDeps stats.Deps
 	cancel    context.CancelFunc
-	errCh     chan error
+	// done is closed when the current frontend exits. It is replaced on every
+	// successful Reload so callers watching a specific generation see its
+	// exit. Use Exit for a stable signal across reloads.
+	done chan struct{}
+	// err holds the current frontend's exit error, set before done is closed.
+	err error
+	// exit is closed when the frontend exits for any reason other than an
+	// explicit Reload. It is the stable "frontend died" signal for the
+	// supervisor and is never replaced.
+	exit chan struct{}
+	// exitErr records the error that triggered exit.
+	exitErr error
+}
+
+// Exit returns a channel closed when the frontend exits without an explicit
+// Reload (i.e. it crashed or returned on its own). The channel is stable for
+// the lifetime of the manager.
+func (m *frontendManager) Exit() <-chan struct{} {
+	return m.exit
+}
+
+// ExitErr returns the frontend's exit error after Exit has fired.
+func (m *frontendManager) ExitErr() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.exitErr
+}
+
+// watch runs a frontend and reports its exit on done; if the exit was not
+// caused by a Reload (i.e. done is still the manager's current channel), it
+// also closes exit so the supervisor can shut the process down.
+func (m *frontendManager) watch(fr frontendRunner, ctx context.Context, done chan struct{}) {
+	err := fr.Run(ctx)
+	m.mu.Lock()
+	m.err = err
+	close(done)
+	if m.done == done {
+		// This generation was never reloaded: the frontend died on its own.
+		m.exitErr = err
+		close(m.exit)
+	}
+	m.mu.Unlock()
+}
+
+// statsDepsFor returns the stats dependencies for a frontend with the given
+// name, preserving the shared registries and event bus.
+func (m *frontendManager) statsDepsFor(name string) stats.Deps {
+	deps := m.statsDeps
+	deps.Name = name
+	return deps
 }
 
 // Reload stops the current frontend, builds a new one from newConfig, and
@@ -218,31 +275,36 @@ type frontendManager struct {
 // is cancelled. The stats registry, connection registry, and event bus are
 // preserved across reloads.
 func (m *frontendManager) Reload(newConfig *configuration) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Stop the old frontend and wait for it to fully exit.
-	if m.cancel != nil {
-		m.cancel()
-		<-m.errCh
-	}
-
-	// Update the frontend name in statsDeps in case it changed.
-	m.statsDeps.Name = newConfig.Frontend
-
-	// Build the new frontend.
-	newFrontend, err := buildFrontend(newConfig, m.logger, m.statsDeps)
+	// Build the new frontend first so we can swap the generation before
+	// stopping the old one; that way the old watcher never sees itself as the
+	// current generation and cannot fire Exit.
+	newFrontend, err := buildFrontend(newConfig, m.logger, m.statsDepsFor(newConfig.Frontend))
 	if err != nil {
 		return err
 	}
 
-	// Start the new frontend.
-	ctx, cancel := context.WithCancel(m.ctx)
-	errCh := make(chan error, 1)
-	go func() { errCh <- newFrontend.Run(ctx) }()
+	m.mu.Lock()
+	oldCancel := m.cancel
+	oldDone := m.done
 
+	// Install the new generation before cancelling the old. Once m.done no
+	// longer matches oldDone, the old watcher treats its exit as a reload.
+	ctx, cancel := context.WithCancel(m.ctx)
+	done := make(chan struct{})
 	m.cancel = cancel
-	m.errCh = errCh
+	m.done = done
+	m.err = nil
+	m.statsDeps.Name = newConfig.Frontend
+	m.mu.Unlock()
+
+	// Stop the old frontend and wait for it to fully exit before binding the
+	// new listener.
+	if oldCancel != nil {
+		oldCancel()
+		<-oldDone
+	}
+
+	go m.watch(newFrontend, ctx, done)
 	return nil
 }
 

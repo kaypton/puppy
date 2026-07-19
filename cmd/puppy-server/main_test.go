@@ -5,10 +5,12 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/puppy/pkg/adapter/direct"
 	adapterhttpproxy "github.com/puppy/pkg/adapter/httpproxy"
@@ -790,4 +792,119 @@ func TestProviders(t *testing.T) {
 			t.Errorf("original config was mutated: frontend = %v", original["frontend"])
 		}
 	})
+}
+
+// fakeFrontend is a controllable frontendRunner for frontendManager tests.
+type fakeFrontend struct {
+	done chan struct{}
+	err  error
+}
+
+func (f *fakeFrontend) Run(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return f.err
+	case <-f.done:
+		return f.err
+	}
+}
+
+// TestFrontendManagerReload verifies that Reload swaps in a fresh frontend
+// generation without triggering the manager's Exit signal, and that the
+// manager remains usable across restarts.
+func TestFrontendManagerReload(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// Use unprivileged high ports so the test does not collide with common
+	// local proxies (1080/8080).
+	reloadConfig := `frontend = "alpha"
+
+[frontends.alpha]
+type = "httpproxy"
+listen_address = "127.0.0.1"
+listen_port = 48080
+backend = "direct_out"
+shim = "default_tunnel"
+
+[frontends.beta]
+type = "httpproxy"
+listen_address = "127.0.0.1"
+listen_port = 48081
+backend = "direct_out"
+shim = "default_tunnel"
+
+[backends.direct_out]
+type = "direct"
+
+[shims.default_tunnel]
+buffer_size = 32768
+`
+	config, err := loadConfiguration(writeConfig(t, reloadConfig))
+	if err != nil {
+		t.Fatalf("loadConfiguration: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Initial fake frontend: runs until cancelled.
+	initial := &fakeFrontend{done: make(chan struct{})}
+	initialCtx, initialCancel := context.WithCancel(ctx)
+	initialDone := make(chan struct{})
+
+	mgr := &frontendManager{
+		ctx:       ctx,
+		logger:    logger,
+		statsDeps: testStatsDeps(config.Frontend),
+		cancel:    initialCancel,
+		done:      initialDone,
+		exit:      make(chan struct{}),
+	}
+	go mgr.watch(initial, initialCtx, initialDone)
+
+	// Reload to frontend "beta": the old generation exits but Exit must NOT
+	// fire, because the exit was caused by the reload itself.
+	modified := *config
+	modified.Frontend = "beta"
+	if err := mgr.Reload(&modified); err != nil {
+		t.Fatalf("Reload: %v", err)
+	}
+	select {
+	case <-mgr.Exit():
+		t.Fatal("Exit fired during Reload; supervisor would have shut down")
+	default:
+	}
+
+	// The new frontend must be listening on the new port; poll briefly since
+	// the listener is bound asynchronously inside the frontend goroutine.
+	waitForPort(t, "127.0.0.1:48081")
+
+	// A second reload back to "alpha" should also succeed, proving the
+	// manager remains usable after restarts.
+	if err := mgr.Reload(config); err != nil {
+		t.Fatalf("second Reload: %v", err)
+	}
+	waitForPort(t, "127.0.0.1:48080")
+
+	// Exit must still not have fired after two reloads.
+	select {
+	case <-mgr.Exit():
+		t.Fatal("Exit fired after reloads")
+	default:
+	}
+}
+
+// waitForPort polls until a TCP listener accepts connections or the test
+// deadline expires.
+func waitForPort(t *testing.T, addr string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("no listener on %s after 3s", addr)
 }
