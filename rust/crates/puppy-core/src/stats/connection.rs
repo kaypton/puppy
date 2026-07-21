@@ -2,7 +2,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::RwLock;
 
@@ -28,9 +28,17 @@ pub struct ConnectionInfo {
 	pub network: String,
 	/// When the connection was accepted.
 	pub started_at: Instant,
+	/// Wall-clock start time, represented as Unix milliseconds for persistence.
+	pub started_unix_ms: i64,
 	/// Set when the connection is removed from the registry. Shared via
 	/// `RwLock<Option<Instant>>` so `Remove` can mutate it through an `Arc`.
 	pub closed_at: RwLock<Option<Instant>>,
+	/// Wall-clock close time, represented as Unix milliseconds.
+	pub closed_unix_ms: RwLock<Option<i64>>,
+	/// Human-readable close reason (`completed`, `interrupted`, or an error).
+	pub close_reason: RwLock<String>,
+	/// Name of the selected outbound backend when known.
+	pub backend: String,
 
 	bytes_in: AtomicU64,
 	bytes_out: AtomicU64,
@@ -57,7 +65,11 @@ impl ConnectionInfo {
 			protocol: Protocol::Unknown,
 			network: String::new(),
 			started_at: Instant::now(),
+			started_unix_ms: unix_millis(),
 			closed_at: RwLock::new(None),
+			closed_unix_ms: RwLock::new(None),
+			close_reason: RwLock::new(String::new()),
+			backend: String::new(),
 			bytes_in: AtomicU64::new(0),
 			bytes_out: AtomicU64::new(0),
 		}
@@ -73,6 +85,19 @@ impl ConnectionInfo {
 		protocol: Protocol,
 		network: impl Into<String>,
 	) -> Self {
+		Self::with_backend(id, frontend, remote_addr, target, protocol, network, "")
+	}
+
+	/// Creates a fully attributed connection including its selected backend.
+	pub fn with_backend(
+		id: impl Into<String>,
+		frontend: impl Into<String>,
+		remote_addr: impl Into<String>,
+		target: Target,
+		protocol: Protocol,
+		network: impl Into<String>,
+		backend: impl Into<String>,
+	) -> Self {
 		Self {
 			id: id.into(),
 			frontend: frontend.into(),
@@ -81,7 +106,11 @@ impl ConnectionInfo {
 			network: network.into(),
 			target,
 			started_at: Instant::now(),
+			started_unix_ms: unix_millis(),
 			closed_at: RwLock::new(None),
+			closed_unix_ms: RwLock::new(None),
+			close_reason: RwLock::new(String::new()),
+			backend: backend.into(),
 			bytes_in: AtomicU64::new(0),
 			bytes_out: AtomicU64::new(0),
 		}
@@ -119,19 +148,29 @@ impl ConnectionInfo {
 	}
 }
 
+fn unix_millis() -> i64 {
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_millis() as i64
+}
+
 /// Tracks active connections across all frontends.
 ///
 /// Connections are stored as `Arc<ConnectionInfo>` so external holders
 /// (counting wrapper, tests) observe `Remove`'s `closed_at` mutation.
+#[derive(Clone)]
 pub struct ConnectionRegistry {
-	active: RwLock<std::collections::HashMap<String, Arc<ConnectionInfo>>>,
+	active: Arc<RwLock<std::collections::HashMap<String, Arc<ConnectionInfo>>>>,
+	closed: Arc<parking_lot::Mutex<Vec<Arc<ConnectionInfo>>>>,
 }
 
 impl ConnectionRegistry {
 	/// Returns a ready-to-use registry.
 	pub fn new() -> Self {
 		Self {
-			active: RwLock::new(std::collections::HashMap::new()),
+			active: Arc::new(RwLock::new(std::collections::HashMap::new())),
+			closed: Arc::new(parking_lot::Mutex::new(Vec::new())),
 		}
 	}
 
@@ -147,7 +186,17 @@ impl ConnectionRegistry {
 	pub fn remove(&self, id: &str) {
 		if let Some(info) = self.active.write().remove(id) {
 			*info.closed_at.write() = Some(Instant::now());
+			*info.closed_unix_ms.write() = Some(unix_millis());
+			if info.close_reason.read().is_empty() {
+				*info.close_reason.write() = "completed".to_string();
+			}
+			self.closed.lock().push(info);
 		}
+	}
+
+	/// Drains completed connections for durable archival.
+	pub fn drain_closed(&self) -> Vec<Arc<ConnectionInfo>> {
+		std::mem::take(&mut *self.closed.lock())
 	}
 
 	/// Returns the connection with the given id, or `None` if not found.

@@ -77,6 +77,7 @@ fn configuration_server_config_copies_fields_and_runtime_deps() {
 	let bus = EventBus::new();
 	let deps = Deps {
 		name: "test".to_string(),
+		backend: String::new(),
 		stats: Some(stats),
 		conn_reg: Some(conn_reg),
 		bus: Some(bus),
@@ -146,6 +147,7 @@ fn base_runtime_config() -> ServerConfiguration {
 		egress_dialer: None,
 		shim_buffer_size: 0,
 		name: String::new(),
+		backend_name: String::new(),
 		stats: None,
 		conn_reg: None,
 		bus: None,

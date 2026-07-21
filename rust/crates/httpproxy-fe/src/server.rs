@@ -256,10 +256,14 @@ async fn handle_conn(
 	// stay in sync.
 	let conn_info: Option<Arc<ConnectionInfo>> =
 		if config.conn_reg.is_some() || config.stats.is_some() {
-			let info = Arc::new(ConnectionInfo::new(
+			let info = Arc::new(ConnectionInfo::with_backend(
 				generate_connection_id(),
 				config.name.clone(),
 				peer.to_string(),
+				target.clone(),
+				target.protocol,
+				target.net(),
+				config.backend_name.clone(),
 			));
 			let registered = config
 				.conn_reg

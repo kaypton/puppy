@@ -1,28 +1,30 @@
 //! Configuration parsing and validation for puppy-server.
 //!
 //! The `Configuration` shape is built around named frontend/backend/shim maps
-//! plus a `frontend` selector and an optional `[dashboard]` section.
+//! plus a `frontend` selector and optional `[grpc]` / `[observability]` sections.
 //!
 //! All serde structs use `#[serde(deny_unknown_fields)]` so unknown fields
 //! fail at startup. Error strings are stable so the test suite can lock them
 //! down with `assert_eq!` / `contains` checks.
 
 mod backend;
-mod dashboard;
 mod error;
 mod frontend;
+mod grpc;
+mod observability;
 mod shim;
 
 pub use backend::{
 	BackendConfiguration, BackendKind, DirectBackendConfiguration, HttpBackendConfiguration,
 	SocksBackendConfiguration,
 };
-pub use dashboard::DashboardConfiguration;
 pub use error::{ConfigError, ValidationError};
 pub use frontend::{
 	FrontendConfiguration, FrontendKind, HttpFrontendConfiguration, SocksFrontendConfiguration,
 	TunFrontendConfiguration,
 };
+pub use grpc::GrpcConfiguration;
+pub use observability::ObservabilityConfiguration;
 pub use shim::ShimConfiguration;
 
 use std::collections::HashMap;
@@ -47,7 +49,8 @@ pub struct Configuration {
 	#[serde(default)]
 	pub shims: HashMap<String, ShimConfiguration>,
 	#[serde(default)]
-	pub dashboard: Option<DashboardConfiguration>,
+	pub grpc: Option<GrpcConfiguration>,
+	pub observability: Option<ObservabilityConfiguration>,
 }
 
 impl Configuration {
@@ -79,8 +82,16 @@ impl Configuration {
 				.map_err(|e| ValidationError::new(format!("shim {name:?}: {e}")))?;
 		}
 
-		if let Some(dash) = &self.dashboard {
-			dash.validate().map_err(ValidationError::from)?;
+		if let Some(grpc) = &self.grpc {
+			grpc.validate().map_err(ValidationError::from)?;
+			if grpc.enabled && self.observability.is_none() {
+				return Err(ValidationError::new(
+					"observability section is required when grpc is enabled",
+				));
+			}
+		}
+		if let Some(observability) = &self.observability {
+			observability.validate().map_err(ValidationError::from)?;
 		}
 		Ok(())
 	}
@@ -260,7 +271,7 @@ fn find_unknown_type(value: &toml::Value) -> Option<String> {
 
 /// Pass 2: walk the full TOML tree and collect every unknown field as a dotted
 /// path. Both top-level unknowns and nested unknowns (inside
-/// frontends/backends/shims/dashboard) are reported with the same
+/// frontends/backends/shims/grpc/observability) are reported with the same
 /// `configuration contains unknown field(s): ...` envelope.
 ///
 /// Keys are collected in BTreeMap (sorted) order, not file order; tests use
@@ -299,12 +310,17 @@ fn collect_unknown_fields(value: &toml::Value) -> Option<Vec<String>> {
 					collect_unknown_in_groups(groups, "shims", shim_known_fields, &mut keys);
 				}
 			}
-			"dashboard" => {
+			"grpc" => {
 				if let Some(dash) = val.as_table() {
+					collect_unknown_in_table(dash, "grpc", grpc_known_fields(), &mut keys);
+				}
+			}
+			"observability" => {
+				if let Some(obs) = val.as_table() {
 					collect_unknown_in_table(
-						dash,
-						"dashboard",
-						dashboard_known_fields(),
+						obs,
+						"observability",
+						observability_known_fields(),
 						&mut keys,
 					);
 				}
@@ -376,7 +392,7 @@ fn collect_unknown_in_groups(
 	}
 }
 
-/// Collects unknown fields in a flat table (dashboard).
+/// Collects unknown fields in a flat configuration table.
 fn collect_unknown_in_table(
 	table: &toml::value::Table,
 	prefix: &str,
@@ -453,7 +469,7 @@ fn shim_known_fields(_kind: &str) -> &'static [&'static str] {
 	&["buffer_size"]
 }
 
-fn dashboard_known_fields() -> &'static [&'static str] {
+fn grpc_known_fields() -> &'static [&'static str] {
 	&[
 		"enabled",
 		"listen_address",
@@ -461,6 +477,18 @@ fn dashboard_known_fields() -> &'static [&'static str] {
 		"tls_cert_file",
 		"tls_key_file",
 		"token",
+	]
+}
+
+fn observability_known_fields() -> &'static [&'static str] {
+	&[
+		"database_path",
+		"log_directory",
+		"checkpoint_interval_ms",
+		"connection_retention_days",
+		"connection_max_rows",
+		"log_retention_days",
+		"log_max_total_bytes",
 	]
 }
 

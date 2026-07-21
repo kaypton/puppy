@@ -1,0 +1,24 @@
+[package]
+name = "puppy-tui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "puppy-tui"
+path = "src/main.rs"
+
+[dependencies]
+puppy-rpc = { path = "../puppy-rpc" }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+prost-types = { workspace = true }
+clap = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+futures-util = { workspace = true }
+rustls-native-certs = { workspace = true }
+anyhow = { workspace = true }
+rpassword = "7"

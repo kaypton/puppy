@@ -1,6 +1,8 @@
-# Puppy Go → Rust 重构执行计划
+# Puppy Go → Rust 重构执行计划（历史归档）
 
-> 本文档供下一个 AI Agent 执行使用。读完整文档后再开始动手；任何与下述前提冲突的"省事"做法都应先与人类 owner 确认。
+> 说明：本文记录初始迁移阶段，Electron 与 HTTP dashboard 相关内容已被 Ratatui + gRPC 可观测性实现取代，不再代表当前架构。
+
+> 本文仅供理解历史迁移决策，不应作为当前实现任务清单。
 
 ## 0. 背景与目标
 
@@ -511,5 +513,3 @@ puppy/
 - [ ] 读 `app/desktop/puppy/src/main/server/manager.ts`，确认 Electron 端对二进制的期望。
 - [ ] 在 `rust/` 下 `cargo init --workspace` 后立即 commit "phase 0: scaffold"，作为后续 PR 的基线。
 - [ ] 每个 Phase 完成后回到本文件对应小节，逐条勾选"实现要点"与"验收标准"，未达标的回炉。
-
-

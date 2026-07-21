@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package puppy.observability.v1;
+
+import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
+
+service Observability {
+  rpc GetOverview(google.protobuf.Empty) returns (Overview);
+  rpc ListConnections(ListConnectionsRequest) returns (ListConnectionsResponse);
+  rpc GetConnection(GetConnectionRequest) returns (Connection);
+  rpc WatchConnections(WatchConnectionsRequest) returns (stream ConnectionUpdate);
+  rpc ListLogs(ListLogsRequest) returns (ListLogsResponse);
+  rpc WatchLogs(WatchLogsRequest) returns (stream LogEntry);
+  rpc WatchTraffic(WatchTrafficRequest) returns (stream TrafficSample);
+}
+
+message Overview {
+  string api_version = 1;
+  string server_version = 2;
+  string server_instance_id = 3;
+  google.protobuf.Timestamp started_at = 4;
+  double uptime_seconds = 5;
+  uint32 pid = 6;
+  bool degraded = 7;
+  string degraded_reason = 8;
+  uint64 process_total_connections = 9;
+  uint64 active_connections = 10;
+  uint64 dial_successes = 11;
+  uint64 dial_failures = 12;
+  uint64 process_bytes_in = 13;
+  uint64 process_bytes_out = 14;
+  uint64 all_time_connections = 15;
+  uint64 all_time_bytes_in = 16;
+  uint64 all_time_bytes_out = 17;
+}
+
+enum ConnectionStatus {
+  CONNECTION_STATUS_UNSPECIFIED = 0;
+  CONNECTION_STATUS_ACTIVE = 1;
+  CONNECTION_STATUS_CLOSED = 2;
+  CONNECTION_STATUS_INTERRUPTED = 3;
+}
+
+message Connection {
+  string id = 1;
+  string server_instance_id = 2;
+  ConnectionStatus status = 3;
+  string frontend = 4;
+  string backend = 5;
+  string remote_addr = 6;
+  string target_host = 7;
+  uint32 target_port = 8;
+  string network = 9;
+  string protocol = 10;
+  google.protobuf.Timestamp started_at = 11;
+  optional google.protobuf.Timestamp closed_at = 12;
+  uint64 duration_ms = 13;
+  uint64 bytes_in = 14;
+  uint64 bytes_out = 15;
+  string close_reason = 16;
+}
+
+message ListConnectionsRequest {
+  ConnectionStatus status = 1;
+  string frontend = 2;
+  string network = 3;
+  string protocol = 4;
+  string query = 5;
+  uint32 page_size = 6;
+  string page_token = 7;
+  string sort_by = 8;
+  bool descending = 9;
+}
+
+message ListConnectionsResponse {
+  repeated Connection connections = 1;
+  string next_page_token = 2;
+  uint64 total = 3;
+}
+
+message GetConnectionRequest { string id = 1; }
+
+message WatchConnectionsRequest { bool include_initial = 1; }
+
+enum ConnectionUpdateKind {
+  CONNECTION_UPDATE_KIND_UNSPECIFIED = 0;
+  CONNECTION_UPDATE_KIND_SNAPSHOT = 1;
+  CONNECTION_UPDATE_KIND_UPSERT = 2;
+  CONNECTION_UPDATE_KIND_CLOSED = 3;
+}
+
+message ConnectionUpdate {
+  ConnectionUpdateKind kind = 1;
+  Connection connection = 2;
+}
+
+message LogFilter {
+  string min_level = 1;
+  string target = 2;
+  string query = 3;
+}
+
+message LogEntry {
+  string cursor = 1;
+  string server_instance_id = 2;
+  google.protobuf.Timestamp time = 3;
+  string level = 4;
+  string target = 5;
+  string message = 6;
+  map<string, string> fields = 7;
+}
+
+message ListLogsRequest {
+  LogFilter filter = 1;
+  uint32 limit = 2;
+  string before_cursor = 3;
+}
+
+message ListLogsResponse {
+  repeated LogEntry entries = 1;
+  string next_cursor = 2;
+}
+
+message WatchLogsRequest {
+  LogFilter filter = 1;
+  string after_cursor = 2;
+}
+
+message WatchTrafficRequest { uint32 interval_ms = 1; }
+
+message TrafficSample {
+  google.protobuf.Timestamp time = 1;
+  uint64 interval_ms = 2;
+  uint64 bytes_in_per_second = 3;
+  uint64 bytes_out_per_second = 4;
+  uint64 process_bytes_in = 5;
+  uint64 process_bytes_out = 6;
+  uint64 all_time_bytes_in = 7;
+  uint64 all_time_bytes_out = 8;
+  uint64 active_connections = 9;
+}

@@ -58,69 +58,35 @@ rustup target add aarch64-apple-darwin
 cd rust && cargo build --release --bin puppy-server --target aarch64-apple-darwin
 ```
 
-交叉编译产物位于 `rust/target/<target>/release/puppy-server`。跨操作系统构建通常还需要对应的 linker/sysroot；桌面打包可通过 `DESKTOP_OS` 和 `DESKTOP_ARCH` 选择目标。
+交叉编译产物位于 `rust/target/<target>/release/puppy-server`。跨操作系统构建通常还需要对应的 linker/sysroot。
 
-### 编译 Electron 桌面应用
+### 编译和运行 TUI
 
-桌面应用代码位于 `app/desktop/puppy`，是一个 Electron + Vite + React 项目。需要 Node.js 20+ 和 npm。
+`puppy-tui` 是独立的 Ratatui 客户端，通过 TLS gRPC 连接 `puppy-server`：
 
 ```bash
-# 安装桌面应用依赖（首次构建前必须执行）
-make desktop-deps
-
-# 只编译桌面应用的前端/主进程/预加载脚本，不打包
-make desktop-build
-
-# 为当前宿主系统构建桌面安装包（仅 Linux 和 macOS，默认使用宿主架构）
-make desktop-package
-
-# 为 Linux 构建安装包，默认使用宿主架构；在 x64 上交叉编译 arm64 时指定 DESKTOP_ARCH
-make desktop-package-linux
-make desktop-package-linux DESKTOP_ARCH=arm64
-
-# 为 macOS 构建安装包，默认使用宿主架构；在 x64 上交叉编译 Apple Silicon 时指定 DESKTOP_ARCH
-make desktop-package-mac
-make desktop-package-mac DESKTOP_ARCH=arm64
-
-# 在 Apple Silicon 上为 x64 构建 macOS 安装包
-make desktop-package-mac DESKTOP_ARCH=x64
+make tui-build
+PUPPY_TUI_TOKEN='配置中的 token' make tui-run ARGS="--endpoint https://127.0.0.1:50051 --ca-cert ./certs/proxy-cert.pem"
 ```
 
-打包时会自动将对应 OS/arch 的 `puppy-server` 二进制一起嵌入安装包（位于 `resources/bin/puppy-server-<os>-<arch>`），桌面应用在运行时会通过 `process.resourcesPath` 找到它。
+未设置 `PUPPY_TUI_TOKEN` 时会安全提示输入。自签名证书必须通过 `--ca-cert` 显式信任；证书名称与连接地址不一致时可补充 `--server-name`。
 
 ### 常用 Make 目标速查
 
 | 目标 | 说明 |
 |------|------|
 | `make build` | 编译当前宿主 OS/arch 的服务端二进制 |
+| `make tui-build` | 编译当前宿主 OS/arch 的 TUI 二进制 |
 | `make run CONFIG=./config.toml` | 编译并运行服务端 |
+| `make tui-run ARGS="..."` | 开发模式运行 TUI |
 | `make test` | 运行 Rust 工作区全部测试 |
 | `make test-race` | 运行 Rust 工作区全部测试（兼容别名） |
 | `make test-cover` | 使用 `cargo-llvm-cov` 生成 `coverage.out` |
 | `make check` | 运行测试与 Clippy |
 | `make fmt` | 格式化所有 Rust crate |
 | `make vet` | 对所有 target 运行 Clippy 并拒绝警告 |
-| `make clean` | 清理 `bin/`、`coverage.out` 和桌面构建产物 |
-| `make desktop-deps` | 安装桌面应用 npm 依赖 |
-| `make desktop-build` | 编译桌面应用渲染/主进程/预加载脚本 |
-| `make desktop-package` | 为当前宿主系统打包桌面应用（默认使用宿主架构） |
-| `make desktop-package-linux` | 为 Linux 打包桌面应用（默认使用宿主架构，可覆盖 `DESKTOP_ARCH`） |
-| `make desktop-package-mac` | 为 macOS 打包桌面应用（默认使用宿主架构，可覆盖 `DESKTOP_ARCH`） |
-| `make desktop-clean` | 清理桌面应用 `dist/` 和打包用的二进制 |
+| `make clean` | 清理 `bin/`、`coverage.out` 和 Rust 构建产物 |
 | `make help` | 列出所有可用目标 |
-
-### 桌面打包加速与排错
-
-- Electron 二进制下载较慢，可在安装依赖时设置国内镜像：
-  ```bash
-  ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/ make desktop-deps
-  ```
-- 只想验证打包产物结构而不生成完整安装包，可追加 `ELECTRON_BUILDER_ARGS=--dir`：
-  ```bash
-  make desktop-package-linux ELECTRON_BUILDER_ARGS=--dir
-  ```
-  输出目录为 `app/desktop/puppy/dist/linux-unpacked`（Linux）或 `app/desktop/puppy/dist/mac`（macOS）。
-- 桌面打包产物（`app/desktop/puppy/dist/`、`app/desktop/puppy/bin/`）已被 `.gitignore` 忽略，无需提交。
 
 ## 快速开始
 
@@ -507,24 +473,15 @@ bin/puppy-server --config ./config.toml     # 启动（-c 是 --config 的简写
 
 ```bash
 make build           # 编译当前宿主 OS/arch 的 bin/puppy-server-<os>-<arch>
+make tui-build       # 编译 bin/puppy-tui-<os>-<arch>
 make run CONFIG=./config.toml   # 编译并运行
+make tui-run ARGS="--endpoint https://127.0.0.1:50051 --ca-cert ./certs/proxy-cert.pem"
 make test            # 单元测试与回环集成测试
 make test-race       # 全工作区测试（兼容别名）
 make test-cover      # 通过 cargo-llvm-cov 输出 coverage.out
 make check           # 测试 + Clippy
 make fmt             # rustfmt 格式化
-make clean           # 清理 bin/、coverage.out 和桌面构建产物
-```
-
-桌面应用打包：
-
-```bash
-make desktop-deps              # 安装桌面应用 npm 依赖
-make desktop-build             # 编译桌面应用，不打包
-make desktop-package           # 为当前宿主系统打包（默认使用宿主架构）
-make desktop-package-linux     # 为 Linux 打包（默认使用宿主架构；x64 上交叉编译 arm64 时加 DESKTOP_ARCH=arm64）
-make desktop-package-mac       # 为 macOS 打包（默认使用宿主架构；x64 上交叉编译 Apple Silicon 时加 DESKTOP_ARCH=arm64）
-make desktop-clean             # 清理桌面构建产物
+make clean           # 清理 bin/、coverage.out 和 Rust 构建产物
 ```
 
 

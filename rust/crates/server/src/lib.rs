@@ -163,8 +163,9 @@ fn build_http_frontend(
 	name: &str,
 	file: &HttpFrontendConfiguration,
 	config: &Configuration,
-	stats_deps: Deps,
+	mut stats_deps: Deps,
 ) -> Result<Frontend, BuildError> {
+	stats_deps.backend = file.backend.clone();
 	let backend = build_backend(&file.backend, &config.backends[&file.backend])
 		.map_err(|e| wrap_frontend_err(name, e))?;
 	let shim_buffer_size = shim_buffer_size(config, &file.shim, name)?;
@@ -189,8 +190,9 @@ fn build_socks_frontend(
 	name: &str,
 	file: &SocksFrontendConfiguration,
 	config: &Configuration,
-	stats_deps: Deps,
+	mut stats_deps: Deps,
 ) -> Result<Frontend, BuildError> {
+	stats_deps.backend = file.backend.clone();
 	let backend = build_backend(&file.backend, &config.backends[&file.backend])
 		.map_err(|e| wrap_frontend_err(name, e))?;
 	let shim_buffer_size = shim_buffer_size(config, &file.shim, name)?;
@@ -297,15 +299,23 @@ fn shim_buffer_size(
 /// Output goes to stderr. The filter defaults to `info` and can be overridden
 /// via `RUST_LOG`.
 pub fn init_tracing() {
-	use tracing_subscriber::fmt::format::FmtSpan;
-	tracing_subscriber::fmt()
-		.with_env_filter(
-			EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-		)
+	init_tracing_with_log(None);
+}
+
+/// Initializes JSON stderr logging and, when supplied, durable/streamed logs.
+pub fn init_tracing_with_log(log_hub: Option<puppy_observability::LogHub>) {
+	use tracing_subscriber::layer::SubscriberExt;
+	use tracing_subscriber::util::SubscriberInitExt;
+	let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+	let stderr = tracing_subscriber::fmt::layer()
 		.with_writer(std::io::stderr)
-		.with_span_events(FmtSpan::NONE)
-		.json()
-		.init();
+		.json();
+	let durable = log_hub.map(|hub| hub.layer());
+	let _ = tracing_subscriber::registry()
+		.with(filter)
+		.with(stderr)
+		.with(durable)
+		.try_init();
 }
 
 #[cfg(test)]

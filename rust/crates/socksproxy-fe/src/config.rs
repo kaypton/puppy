@@ -44,6 +44,7 @@ pub struct ServerConfiguration {
 	pub shim_buffer_size: usize,
 	/// Frontend name used for stats attribution and event publishing.
 	pub name: String,
+	pub backend_name: String,
 	/// Global counter registry. `None` disables global counting.
 	pub stats: Option<Arc<StatsRegistry>>,
 	/// Active connection registry. `None` disables per-connection tracking.
@@ -116,6 +117,7 @@ impl ServerConfiguration {
 			egress_dialer: None,
 			shim_buffer_size,
 			name: stats_deps.name,
+			backend_name: stats_deps.backend,
 			stats: stats_deps.stats.map(Arc::new),
 			conn_reg: stats_deps.conn_reg.map(Arc::new),
 			bus: stats_deps.bus.map(Arc::new),

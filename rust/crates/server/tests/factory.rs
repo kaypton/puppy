@@ -96,6 +96,7 @@ fn load_str(contents: &str) -> Configuration {
 fn test_stats_deps(name: &str) -> Deps {
 	Deps {
 		name: name.to_string(),
+		backend: String::new(),
 		stats: Some(StatsRegistry::new()),
 		conn_reg: Some(ConnectionRegistry::new()),
 		bus: Some(EventBus::new()),

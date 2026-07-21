@@ -240,21 +240,17 @@ shim = "default_tunnel"
 # 设置为 0 或省略该选项时使用内置默认值 32768（32 KiB）；负数无效。
 buffer_size = 32768
 
-# Dashboard HTTP API 配置。
-# 启用后，puppy-server 会在指定地址上运行一个 RESTful 管理 API，提供运行时
-# 统计、活跃连接查看、配置查看、热重载和优雅关闭等能力。前后端分离，
-# 前端独立部署，Go 端只提供 JSON API 和 SSE 事件流。接口文档见 docs/HTTP-API.md。
-[dashboard]
-# enabled 为 true 时启动 dashboard 服务。省略或为 false 时不启动。
+# gRPC 只读可观测性 API，供独立 puppy-tui 客户端连接。
+[grpc]
 enabled = true
 
-# listen_address 是 dashboard 监听的本地 IP 地址。
+# listen_address 是 gRPC 管理面监听的本地 IP 地址。
 # 建议使用 127.0.0.1 限制仅本机访问；如需远程访问请确保网络安全并配置 token。
 # 使用 IPv6 时不需要方括号，例如 "::1" 或 "2001:db8::1"。
 listen_address = "127.0.0.1"
 
-# listen_port 是 dashboard 监听的 TCP 端口。
-listen_port = 8443
+# listen_port 是 gRPC 管理面监听的 TCP 端口。
+listen_port = 50051
 
 # tls_cert_file 和 tls_key_file 启用 HTTPS。两项必须同时配置或同时省略。
 # 建议启用 HTTPS 以保护 token 和数据。可复用 proxy 的证书，或单独生成。
@@ -265,4 +261,15 @@ tls_key_file = "./certs/proxy-key.pem"
 # token 是 Bearer 认证令牌。非空时所有 API 请求必须携带
 # Authorization: Bearer <token> 头。留空时关闭认证（仅建议本地监听时使用）。
 # 生产环境请使用足够长的随机字符串。
-token = "puppy-dashboard-secret"
+token = "replace-with-a-long-random-token"
+
+# 连接历史和结构化日志存储。相对路径以配置文件所在目录为基准。
+[observability]
+database_path = "./data/puppy-observability.sqlite3"
+log_directory = "./logs"
+checkpoint_interval_ms = 1000
+# 0 表示永久保留/不限数量。
+connection_retention_days = 0
+connection_max_rows = 0
+log_retention_days = 0
+log_max_total_bytes = 0

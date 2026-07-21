@@ -454,8 +454,7 @@ fn load_configuration_missing_file() {
 
 #[test]
 fn example_configuration_loads() {
-	// config.toml ships with [dashboard] enabled = true; the dashboard section
-	// must validate but the server bin ignores it.
+	// config.toml ships with the gRPC observability service enabled.
 	// CARGO_MANIFEST_DIR is crates/config, so config.toml is ../../../config.toml.
 	let manifest_dir = env!("CARGO_MANIFEST_DIR");
 	let path = std::path::Path::new(manifest_dir).join("../../../config.toml");
@@ -464,22 +463,21 @@ fn example_configuration_loads() {
 }
 
 #[test]
-fn load_configuration_with_dashboard() {
+fn load_configuration_with_grpc() {
 	let contents = format!(
-		"{VALID_CONFIGURATION}\n[dashboard]\nenabled = true\nlisten_address = \"127.0.0.1\"\nlisten_port = 8443\ntoken = \"test-token\"\n"
+		"{VALID_CONFIGURATION}\n[grpc]\nenabled = true\nlisten_address = \"127.0.0.1\"\nlisten_port = 8443\ntls_cert_file = \"cert.pem\"\ntls_key_file = \"key.pem\"\ntoken = \"test-token\"\n[observability]\ndatabase_path = \"puppy.db\"\nlog_directory = \"logs\"\n"
 	);
 	let cfg = load_str(&contents).expect("load");
-	let dash = cfg.dashboard.expect("dashboard present");
+	let dash = cfg.grpc.expect("grpc present");
 	assert!(dash.enabled);
 	assert_eq!(dash.listen_port, 8443);
 	assert_eq!(dash.token, "test-token");
 }
 
 #[test]
-fn load_configuration_rejects_unknown_dashboard_field() {
-	let contents = format!(
-		"{VALID_CONFIGURATION}\n[dashboard]\nenabled = true\nlisten_address = \"127.0.0.1\"\nlisten_port = 8443\nunknown_field = \"bad\"\n"
-	);
+fn load_configuration_rejects_unknown_grpc_field() {
+	let contents =
+		format!("{VALID_CONFIGURATION}\n[grpc]\nenabled = false\nunknown_field = \"bad\"\n");
 	let err = load_str(&contents).unwrap_err().to_string();
 	assert!(
 		err.contains("unknown field"),

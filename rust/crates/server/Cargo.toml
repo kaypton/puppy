@@ -22,15 +22,22 @@ socksproxy-fe = { path = "../socksproxy-fe" }
 httpproxy-be = { path = "../httpproxy-be" }
 socksproxy-be = { path = "../socksproxy-be" }
 tun = { path = "../tun" }
+puppy-rpc = { path = "../puppy-rpc" }
+puppy-observability = { path = "../puppy-observability" }
 tokio = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
+tonic = { workspace = true }
+tonic-health = "0.12"
+tokio-util = { workspace = true }
+subtle = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
 assert_cmd = { workspace = true }
 tokio = { workspace = true }
 libc = { workspace = true }
+rcgen = "0.13"
