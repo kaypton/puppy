@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = [
+	"crates/puppy-core",
+	"crates/config",
+	"crates/direct",
+	"crates/httpproxy-fe",
+	"crates/socksproxy-fe",
+	"crates/httpproxy-be",
+	"crates/socksproxy-be",
+	"crates/tun",
+	"crates/server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.95"
+license = "MIT"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "fs"] }
+# Serialization
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# CLI
+clap = { version = "4", features = ["derive"] }
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+# TLS
+rustls = "0.23"
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+rustls-native-certs = "0.8"
+# HTTP parsing
+httparse = "1"
+# Encoding
+base64 = "0.22"
+# Constant-time comparison
+subtle = "2"
+# Random
+rand = "0.8"
+# User-space netstack (TUN only)
+smoltcp = { version = "=0.11.0", default-features = false }
+# Syscalls
+nix = { version = "0.29", features = ["net", "socket", "ioctl", "fs"] }
+libc = "0.2"
+# Socket control
+socket2 = "0.5"
+# Sync primitives
+parking_lot = "0.12"
+# Errors
+thiserror = "1"
+anyhow = "1"
+# Bytes
+bytes = "1"
+# Async trait
+async-trait = "0.1"
+# Testing
+assert_cmd = "2"
+tokio-test = "0.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

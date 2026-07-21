@@ -1,0 +1,36 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lib]
+name = "server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "puppy-server"
+path = "src/main.rs"
+
+[dependencies]
+puppy-core = { path = "../puppy-core" }
+config = { path = "../config" }
+direct = { path = "../direct" }
+httpproxy-fe = { path = "../httpproxy-fe" }
+socksproxy-fe = { path = "../socksproxy-fe" }
+httpproxy-be = { path = "../httpproxy-be" }
+socksproxy-be = { path = "../socksproxy-be" }
+tun = { path = "../tun" }
+tokio = { workspace = true }
+clap = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = { workspace = true }
+tokio = { workspace = true }
+libc = { workspace = true }
