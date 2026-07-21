@@ -34,7 +34,7 @@ export default function OverviewPage(): React.JSX.Element {
               title="运行时"
               fields={[
                 { label: 'API 版本', value: data.version },
-                { label: 'Go 版本', value: data.go_version },
+                { label: 'Rust 版本', value: data.rust_version },
                 { label: 'PID', value: data.pid },
                 { label: '启动时间', value: formatTime(data.started_at) },
                 { label: '运行时长', value: formatUptime(data.uptime_seconds) }

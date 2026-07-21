@@ -7,7 +7,7 @@
 
 export interface SystemInfo {
   version: string
-  go_version: string
+  rust_version: string
   started_at: string
   uptime_seconds: number
   pid: number

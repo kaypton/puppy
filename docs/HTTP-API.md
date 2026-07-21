@@ -47,7 +47,7 @@ Content-Type: application/json
 ```json
 {
   "version": "v1",
-  "go_version": "go1.26.3",
+  "rust_version": "rustc 1.95.0",
   "started_at": "2026-07-15T19:00:00+08:00",
   "uptime_seconds": 1800.5,
   "pid": 12345,
@@ -59,7 +59,7 @@ Content-Type: application/json
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | version | string | API 版本 |
-| go_version | string | Go 运行时版本 |
+| rust_version | string | Rust 编译器版本 |
 | started_at | string | 服务器启动时间 (RFC 3339) |
 | uptime_seconds | float | 运行时长（秒） |
 | pid | int | 进程 ID |
@@ -75,7 +75,7 @@ curl -k -H "Authorization: Bearer <token>" https://127.0.0.1:8443/api/v1/system
 
 #### POST /system/shutdown
 
-请求服务器优雅关闭。发送控制请求到主 goroutine，返回 `202 Accepted`。关闭结果通过 SSE 事件流推送（`shutdown` 事件）。
+请求服务器优雅关闭。发送请求到主控制任务，返回 `202 Accepted`。关闭结果通过 SSE 事件流推送（`shutdown` 事件）。
 
 **响应 202 Accepted:**
 

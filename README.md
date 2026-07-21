@@ -1,6 +1,6 @@
 # Puppy
 
-Puppy 是一个用 Go 编写的代理服务，支持三种工作模式：
+Puppy 是一个用 Rust 编写的代理服务，支持三种工作模式：
 
 - **HTTP CONNECT 代理**：在本地监听一个 HTTP(S) 代理端口，供浏览器、CLI 或任意支持 HTTP 代理的应用使用。
 - **SOCKS5 代理**：在本地监听一个 SOCKS5 代理端口（可选 TLS 与用户名/密码认证），供支持 SOCKS5 的应用使用。
@@ -21,7 +21,7 @@ Puppy 是一个用 Go 编写的代理服务，支持三种工作模式：
 
 ## 安装与构建
 
-需要 Go 1.24+。依赖已 vendored，无需联网。
+需要 Rust 1.95+。仓库通过 `rust/rust-toolchain.toml` 固定工具链版本，依赖版本由 `rust/Cargo.lock` 锁定。
 
 ### 编译服务端二进制
 
@@ -36,27 +36,29 @@ make build              # 生成 bin/puppy-server-<os>-<arch>
 - macOS x86_64 → `bin/puppy-server-darwin-x64`
 - macOS Apple Silicon → `bin/puppy-server-darwin-arm64`
 
-### 使用 Makefile 交叉编译服务端二进制
+### 交叉编译服务端二进制
 
-所有交叉编译都通过设置 `GOOS`/`GOARCH` 完成。Makefile 固定使用 `-mod=vendor`，无需额外参数。
+交叉编译使用 Rust target triple。先通过 `rustup target add` 安装目标，再从 `rust/` 工作区构建：
 
 ```bash
-# Linux amd64
-GOOS=linux GOARCH=amd64 make build
+# Linux x86_64
+rustup target add x86_64-unknown-linux-gnu
+cd rust && cargo build --release --bin puppy-server --target x86_64-unknown-linux-gnu
 
 # Linux arm64
-GOOS=linux GOARCH=arm64 make build
+rustup target add aarch64-unknown-linux-gnu
+cd rust && cargo build --release --bin puppy-server --target aarch64-unknown-linux-gnu
 
-# macOS amd64
-GOOS=darwin GOARCH=amd64 make build
+# macOS x86_64
+rustup target add x86_64-apple-darwin
+cd rust && cargo build --release --bin puppy-server --target x86_64-apple-darwin
 
 # macOS arm64 (Apple Silicon)
-GOOS=darwin GOARCH=arm64 make build
+rustup target add aarch64-apple-darwin
+cd rust && cargo build --release --bin puppy-server --target aarch64-apple-darwin
 ```
 
-交叉编译产物同样按 Node 风格命名为 `puppy-server-<os>-<arch>`，例如 `GOOS=linux GOARCH=amd64` 输出 `bin/puppy-server-linux-x64`，`GOOS=darwin GOARCH=arm64` 输出 `bin/puppy-server-darwin-arm64`。`make build` 使用 `GOARCH` 原始值（`amd64`/`arm64`）来映射到 `DESKTOP_ARCH`（`x64`/`arm64`）。
-
-TUN 模式依赖 `gvisor.dev/gvisor`，在 Linux 上本机构建即可；交叉编译到非 Linux 目标时通常不影响 HTTP/SOCKS 前端。
+交叉编译产物位于 `rust/target/<target>/release/puppy-server`。跨操作系统构建通常还需要对应的 linker/sysroot；桌面打包可通过 `DESKTOP_OS` 和 `DESKTOP_ARCH` 选择目标。
 
 ### 编译 Electron 桌面应用
 
@@ -92,13 +94,12 @@ make desktop-package-mac DESKTOP_ARCH=x64
 |------|------|
 | `make build` | 编译当前宿主 OS/arch 的服务端二进制 |
 | `make run CONFIG=./config.toml` | 编译并运行服务端 |
-| `make test` | 运行所有 Go 测试 |
-| `make test-race` | 带 race 检测运行测试 |
-| `make test-cover` | 运行测试并输出 `coverage.out` |
-| `make check` | 运行 `test` + `vet` |
-| `make fmt` | 格式化所有 Go 文件 |
-| `make vet` | 运行 `go vet` |
-| `make vendor` | 同步 `vendor/` 依赖 |
+| `make test` | 运行 Rust 工作区全部测试 |
+| `make test-race` | 运行 Rust 工作区全部测试（兼容别名） |
+| `make test-cover` | 使用 `cargo-llvm-cov` 生成 `coverage.out` |
+| `make check` | 运行测试与 Clippy |
+| `make fmt` | 格式化所有 Rust crate |
+| `make vet` | 对所有 target 运行 Clippy 并拒绝警告 |
 | `make clean` | 清理 `bin/`、`coverage.out` 和桌面构建产物 |
 | `make desktop-deps` | 安装桌面应用 npm 依赖 |
 | `make desktop-build` | 编译桌面应用渲染/主进程/预加载脚本 |
@@ -508,11 +509,10 @@ bin/puppy-server --config ./config.toml     # 启动（-c 是 --config 的简写
 make build           # 编译当前宿主 OS/arch 的 bin/puppy-server-<os>-<arch>
 make run CONFIG=./config.toml   # 编译并运行
 make test            # 单元测试与回环集成测试
-make test-race       # 带 race 检测
-make test-cover      # 输出 coverage.out
-make check           # test + vet
-make fmt             # 格式化
-make vendor          # 重新同步 vendor/
+make test-race       # 全工作区测试（兼容别名）
+make test-cover      # 通过 cargo-llvm-cov 输出 coverage.out
+make check           # 测试 + Clippy
+make fmt             # rustfmt 格式化
 make clean           # 清理 bin/、coverage.out 和桌面构建产物
 ```
 

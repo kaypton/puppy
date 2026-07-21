@@ -52,7 +52,7 @@ DESKTOP_RUST_TARGET := $(DESKTOP_RUST_ARCH)-$(if $(filter darwin,$(DESKTOP_OS)),
 
 .DEFAULT_GOAL := build
 
-.PHONY: build clean vendor test test-race test-cover run fmt vet check help \
+.PHONY: build clean test test-race test-cover run fmt vet check help \
 	cargo-build cargo-run cargo-test cargo-clippy cargo-fmt-check \
 	desktop-deps desktop-build desktop-package desktop-clean \
 	desktop-package-mac desktop-package-linux
@@ -68,9 +68,6 @@ $(BINARY_PATH): $(RUST_SOURCES)
 
 clean: desktop-clean ## Remove generated binaries, coverage output, and desktop build artifacts.
 	rm -rf $(BIN_DIR) coverage.out $(CARGO_BUILD_TARGET_DIR)
-
-vendor: ## No-op: Rust uses Cargo.lock, not a vendored directory. Kept for compatibility.
-	@echo "Rust workspace does not use vendoring; nothing to do"
 
 test: ## Run all Rust tests.
 	cd $(RUST_DIR) && $(CARGO) test --workspace
