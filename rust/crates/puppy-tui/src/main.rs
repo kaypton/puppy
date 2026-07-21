@@ -144,6 +144,14 @@ impl ConnectionGroup {
 	}
 }
 
+/// A display row on the Logs page: adjacent identical entries aggregated into
+/// one row. `entry` is the latest entry of the group.
+struct LogRow {
+	entry: LogEntry,
+	first_time: Option<prost_types::Timestamp>,
+	count: usize,
+}
+
 enum NetworkEvent {
 	Connected,
 	Disconnected(String),
@@ -335,6 +343,31 @@ impl App {
 						|| entry.target.to_lowercase().contains(&query))
 			})
 			.collect()
+	}
+
+	/// Filtered logs with adjacent fully identical entries (same level, target,
+	/// message, and fields) aggregated into a single counted row.
+	fn visible_log_rows(&self) -> Vec<LogRow> {
+		let mut rows: Vec<LogRow> = Vec::new();
+		for entry in self.visible_logs() {
+			if let Some(last) = rows.last_mut() {
+				if last.entry.level == entry.level
+					&& last.entry.target == entry.target
+					&& last.entry.message == entry.message
+					&& last.entry.fields == entry.fields
+				{
+					last.count = last.count.saturating_add(1);
+					last.entry = entry.clone();
+					continue;
+				}
+			}
+			rows.push(LogRow {
+				first_time: entry.time,
+				entry: entry.clone(),
+				count: 1,
+			});
+		}
+		rows
 	}
 }
 
@@ -620,7 +653,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 		KeyCode::Char(' ') if app.page == Page::Logs => {
 			app.follow_logs = !app.follow_logs;
 			if !app.follow_logs {
-				app.selected = app.logs.len().saturating_sub(1);
+				app.selected = app.visible_log_rows().len().saturating_sub(1);
 			}
 		}
 		KeyCode::Char('l') if app.page == Page::Logs => {
@@ -634,18 +667,47 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 			.to_string();
 		}
 		KeyCode::Down | KeyCode::Char('j') => {
+			if app.page == Page::Logs {
+				app.follow_logs = false;
+			}
 			let last = match app.page {
 				Page::Connections => app.connection_row_count().saturating_sub(1),
-				Page::Logs => app.visible_logs().len().saturating_sub(1),
+				Page::Logs => app.visible_log_rows().len().saturating_sub(1),
 				_ => app.selected,
 			};
 			app.selected = app.selected.saturating_add(1).min(last);
 		}
-		KeyCode::Up | KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
-		KeyCode::PageDown => app.selected = app.selected.saturating_add(10),
-		KeyCode::PageUp => app.selected = app.selected.saturating_sub(10),
+		KeyCode::Up | KeyCode::Char('k') => {
+			if app.page == Page::Logs {
+				app.follow_logs = false;
+			}
+			app.selected = app.selected.saturating_sub(1);
+		}
+		KeyCode::PageDown => {
+			if app.page == Page::Logs {
+				app.follow_logs = false;
+				let last = app.visible_log_rows().len().saturating_sub(1);
+				app.selected = app.selected.saturating_add(10).min(last);
+			} else {
+				app.selected = app.selected.saturating_add(10);
+			}
+		}
+		KeyCode::PageUp => {
+			if app.page == Page::Logs {
+				app.follow_logs = false;
+			}
+			app.selected = app.selected.saturating_sub(10);
+		}
 		KeyCode::Enter if app.page == Page::Connections && app.connection_row_count() > 0 => {
 			app.detail = true
+		}
+		KeyCode::Enter if app.page == Page::Logs => {
+			let row_count = app.visible_log_rows().len();
+			if row_count > 0 {
+				app.follow_logs = false;
+				app.selected = app.selected.min(row_count - 1);
+				app.detail = true;
+			}
 		}
 		_ => {}
 	}
@@ -696,7 +758,11 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
 		draw_help(frame, centered(72, 82, size));
 	}
 	if app.detail {
-		draw_detail(frame, centered(76, 76, size), app);
+		let area = centered(76, 76, size);
+		match app.page {
+			Page::Logs => draw_log_detail(frame, area, app),
+			_ => draw_detail(frame, area, app),
+		}
 	}
 	if app.sort_menu {
 		draw_sort_menu(frame, centered(44, 54, size), app);
@@ -788,7 +854,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	frame.render_widget(block, area);
 	let columns = Layout::default()
 		.direction(Direction::Horizontal)
-		.constraints([Constraint::Min(20), Constraint::Length(58)])
+		.constraints([Constraint::Min(20), Constraint::Length(72)])
 		.split(inner);
 	let status_color = if app.connected { MUTED } else { YELLOW };
 	frame.render_widget(
@@ -810,6 +876,7 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 			hints.extend(key_hint("/", "Search"));
 			hints.extend(key_hint("l", "Level"));
 			hints.extend(key_hint("space", "Follow"));
+			hints.extend(key_hint("enter", "Detail"));
 		}
 		_ => hints.extend(key_hint("1–4", "Navigate")),
 	}
@@ -1508,8 +1575,142 @@ fn format_axis_timestamp(timestamp: f64) -> String {
 	)
 }
 
+/// Per-row field pairs that distinguish rows sharing the same level, target,
+/// and message but carrying different fields. Rows in homogeneous groups get
+/// an empty vector so the UI never shows two rows that look identical.
+fn log_detail_fields(rows: &[LogRow]) -> Vec<Vec<(String, String)>> {
+	let mut result: Vec<Vec<(String, String)>> = vec![Vec::new(); rows.len()];
+	let mut groups: HashMap<(&str, &str, &str), Vec<usize>> = HashMap::new();
+	for (index, row) in rows.iter().enumerate() {
+		groups
+			.entry((
+				row.entry.level.as_str(),
+				row.entry.target.as_str(),
+				row.entry.message.as_str(),
+			))
+			.or_default()
+			.push(index);
+	}
+	for indices in groups.values() {
+		if indices.len() < 2 {
+			continue;
+		}
+		let first = &rows[indices[0]].entry.fields;
+		if indices
+			.iter()
+			.all(|&index| rows[index].entry.fields == *first)
+		{
+			continue;
+		}
+		let mut keys: Vec<&str> = indices
+			.iter()
+			.flat_map(|&index| rows[index].entry.fields.keys().map(String::as_str))
+			.collect::<HashSet<_>>()
+			.into_iter()
+			.collect();
+		keys.sort_unstable();
+		keys.retain(|key| {
+			let value = rows[indices[0]].entry.fields.get(*key);
+			indices
+				.iter()
+				.any(|&index| rows[index].entry.fields.get(*key) != value)
+		});
+		keys.truncate(3);
+		for &index in indices {
+			result[index] = keys
+				.iter()
+				.map(|key| {
+					(
+						(*key).to_string(),
+						rows[index]
+							.entry
+							.fields
+							.get(*key)
+							.cloned()
+							.unwrap_or_else(|| "—".to_string()),
+					)
+				})
+				.collect();
+		}
+	}
+	result
+}
+
+/// Number of terminal lines `text` occupies when wrapped at `width` columns.
+fn wrapped_line_count(text: &str, width: usize) -> usize {
+	if width == 0 {
+		return 1;
+	}
+	text.chars().count().max(1).div_ceil(width)
+}
+
+/// Splits `text` into lines of at most `width` columns (character based).
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+	if width == 0 {
+		return vec![text.to_string()];
+	}
+	let mut lines = Vec::new();
+	let mut current = String::new();
+	for ch in text.chars() {
+		if current.chars().count() == width {
+			lines.push(std::mem::take(&mut current));
+		}
+		current.push(ch);
+	}
+	if !current.is_empty() || lines.is_empty() {
+		lines.push(current);
+	}
+	lines
+}
+
+/// Display height of a log row: one metadata line plus the wrapped message.
+fn log_row_height(row: &LogRow, width: usize) -> usize {
+	if row.entry.message.is_empty() {
+		1
+	} else {
+		1 + wrapped_line_count(&row.entry.message, width.saturating_sub(2))
+	}
+}
+
+/// First row index to render so the anchor row stays visible within a
+/// viewport of `capacity` terminal lines, given per-row heights.
+fn scroll_start(
+	total: usize,
+	capacity: usize,
+	height: impl Fn(usize) -> usize,
+	anchor: usize,
+) -> usize {
+	if total == 0 || capacity == 0 {
+		return 0;
+	}
+	let anchor = anchor.min(total - 1);
+	let mut used = height(anchor);
+	let mut start = anchor;
+	while start > 0 {
+		let row_height = height(start - 1);
+		if used.saturating_add(row_height) > capacity {
+			break;
+		}
+		used += row_height;
+		start -= 1;
+	}
+	start
+}
+
+/// Truncates `text` to `width` columns, appending an ellipsis when cut.
+fn truncate(text: &str, width: usize) -> String {
+	if text.chars().count() <= width {
+		return text.to_string();
+	}
+	if width == 0 {
+		return String::new();
+	}
+	format!("{}…", text.chars().take(width - 1).collect::<String>())
+}
+
 fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
-	let visible = app.visible_logs();
+	let rows = app.visible_log_rows();
+	let detail_fields = log_detail_fields(&rows);
 	let layout = Layout::default()
 		.direction(Direction::Vertical)
 		.constraints([
@@ -1518,36 +1719,36 @@ fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 			Constraint::Min(1),
 		])
 		.split(area);
-	let height = layout[2].height.saturating_sub(2) as usize;
-	let start = if app.follow_logs {
-		visible.len().saturating_sub(height)
+	let width = layout[2].width.saturating_sub(2) as usize;
+	let capacity = layout[2].height.saturating_sub(2) as usize;
+	let anchor = if app.follow_logs {
+		rows.len().saturating_sub(1)
 	} else {
-		app.selected
-			.min(visible.len())
-			.saturating_sub(height.saturating_sub(1))
+		app.selected.min(rows.len().saturating_sub(1))
 	};
-	let displayed_count = visible.len();
-	let items = visible
-		.into_iter()
-		.skip(start)
-		.take(height)
-		.enumerate()
-		.map(|(index, entry)| {
-			let color = log_level_color(&entry.level);
-			ListItem::new(Line::from(vec![
-				Span::styled(format!(" {:5} ", entry.level), chip_style(color)),
-				Span::styled(
-					format!(" {:18} ", short(&entry.target)),
-					Style::default().fg(MUTED),
-				),
-				Span::styled(entry.message.as_str(), Style::default().fg(TEXT)),
-			]))
-			.style(if index % 2 == 1 {
-				Style::default().bg(SURFACE)
-			} else {
-				Style::default().bg(BACKGROUND)
-			})
-		});
+	let start = scroll_start(
+		rows.len(),
+		capacity,
+		|index| log_row_height(&rows[index], width),
+		anchor,
+	);
+	let displayed_count = rows.len();
+	let mut items = Vec::new();
+	let mut used = 0;
+	for (index, row) in rows.iter().enumerate().skip(start) {
+		if used >= capacity && !items.is_empty() {
+			break;
+		}
+		used += log_row_height(row, width);
+		let selected = !app.follow_logs && index == anchor;
+		items.push(log_list_item(
+			index,
+			row,
+			&detail_fields[index],
+			selected,
+			width,
+		));
+	}
 	let mode = if app.follow_logs {
 		"Following"
 	} else {
@@ -1588,6 +1789,78 @@ fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	);
 }
 
+/// Builds the two-line list item for a log row: a metadata line (time, level,
+/// target, aggregation count, distinguishing fields) followed by the full
+/// wrapped message.
+fn log_list_item(
+	index: usize,
+	row: &LogRow,
+	detail: &[(String, String)],
+	selected: bool,
+	width: usize,
+) -> ListItem<'static> {
+	let time = row.entry.time.as_ref().map_or_else(
+		|| "--:--:--".to_string(),
+		|time| format_axis_timestamp(proto_time(time)),
+	);
+	let count = if row.count > 1 {
+		format!("×{} ", row.count)
+	} else {
+		String::new()
+	};
+	let fields = detail
+		.iter()
+		.map(|(key, value)| format!("{key}={value} "))
+		.collect::<String>();
+	// marker + " HH:MM:SS " + " LEVEL " + trailing space after the target
+	let prefix_width = 1 + 10 + 7 + 1;
+	let target_budget =
+		width.saturating_sub(prefix_width + count.chars().count() + fields.chars().count());
+	let mut meta = vec![
+		Span::styled(if selected { "▌" } else { " " }, Style::default().fg(CYAN)),
+		Span::styled(format!(" {time} "), Style::default().fg(MUTED)),
+		Span::styled(
+			format!(" {:5} ", row.entry.level),
+			chip_style(log_level_color(&row.entry.level)),
+		),
+		Span::styled(
+			format!("{} ", truncate(&row.entry.target, target_budget)),
+			Style::default().fg(MUTED),
+		),
+	];
+	if row.count > 1 {
+		meta.push(Span::styled(count, Style::default().fg(YELLOW).bold()));
+	}
+	for (key, value) in detail {
+		meta.push(Span::styled(
+			format!("{key}={value} "),
+			Style::default().fg(BLUE),
+		));
+	}
+	let mut lines = vec![Line::from(meta)];
+	if !row.entry.message.is_empty() {
+		for part in wrap_text(&row.entry.message, width.saturating_sub(2)) {
+			lines.push(Line::from(Span::styled(
+				format!("  {part}"),
+				Style::default().fg(TEXT),
+			)));
+		}
+	}
+	let background = if selected {
+		SURFACE_ALT
+	} else if index % 2 == 1 {
+		SURFACE
+	} else {
+		BACKGROUND
+	};
+	let style = if selected {
+		Style::default().fg(TEXT).bg(background).bold()
+	} else {
+		Style::default().bg(background)
+	};
+	ListItem::new(lines).style(style)
+}
+
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 	frame.render_widget(Clear, area);
 	frame.render_widget(
@@ -1602,7 +1875,7 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 			help_line("g", "Group connections by target URL"),
 			help_line("l", "Cycle the minimum log level"),
 			help_line("Space", "Pause or resume log following"),
-			help_line("Enter", "Open connection details"),
+			help_line("Enter", "Open connection or log details"),
 			help_line("Esc", "Close a dialog or finish searching"),
 			help_line("q", "Quit Puppy TUI"),
 		])
@@ -1658,6 +1931,60 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
 				.padding(Padding::horizontal(2)),
 		)
 		.wrap(Wrap { trim: false }),
+		area,
+	);
+}
+
+fn draw_log_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
+	let rows = app.visible_log_rows();
+	let Some(row) = rows.get(app.selected.min(rows.len().saturating_sub(1))) else {
+		return;
+	};
+	frame.render_widget(Clear, area);
+	let mut lines = vec![
+		detail_line("Level", row.entry.level.clone()),
+		detail_line("Target", row.entry.target.clone()),
+		detail_line("Message", row.entry.message.clone()),
+	];
+	if row.count > 1 {
+		lines.push(detail_line(
+			"First seen",
+			timestamp_text(row.first_time.as_ref()),
+		));
+		lines.push(detail_line(
+			"Last seen",
+			timestamp_text(row.entry.time.as_ref()),
+		));
+		lines.push(detail_line("Occurrences", format!("×{}", row.count)));
+	} else {
+		lines.push(detail_line("Time", timestamp_text(row.entry.time.as_ref())));
+	}
+	lines.push(detail_line("Cursor", dash(&row.entry.cursor).to_string()));
+	lines.push(detail_line(
+		"Server instance",
+		dash(&row.entry.server_instance_id).to_string(),
+	));
+	if row.entry.fields.is_empty() {
+		lines.push(detail_line("Fields", "—".to_string()));
+	} else {
+		let mut fields: Vec<_> = row.entry.fields.iter().collect();
+		fields.sort_by(|left, right| left.0.cmp(right.0));
+		for (key, value) in fields {
+			lines.push(detail_line(key, value.clone()));
+		}
+	}
+	frame.render_widget(
+		Paragraph::new(lines)
+			.style(Style::default().fg(TEXT).bg(SURFACE))
+			.block(
+				panel("LOG DETAILS", log_level_color(&row.entry.level))
+					.title_bottom(Line::styled(
+						" Enter / Esc to close ",
+						Style::default().fg(MUTED),
+					))
+					.padding(Padding::horizontal(2)),
+			)
+			.wrap(Wrap { trim: false }),
 		area,
 	);
 }
@@ -2289,6 +2616,145 @@ mod tests {
 		let data = resample_traffic(&samples, 10, |sample| sample.bytes_in_per_second);
 		assert!(data.iter().all(|(_, rate)| *rate == 0.0));
 		assert!(plottable_rate_points(&data).is_empty());
+	}
+
+	#[test]
+	fn logs_aggregate_adjacent_identical_entries() {
+		let mut app = App::default();
+		for _ in 0..2 {
+			app.logs.push_back(log_fixture("server", "ready", &[]));
+		}
+		app.logs.push_back(log_fixture("server", "other", &[]));
+		app.logs.push_back(log_fixture("server", "ready", &[]));
+		let rows = app.visible_log_rows();
+		assert_eq!(rows.len(), 3);
+		assert_eq!(rows[0].count, 2);
+		assert_eq!(rows[1].count, 1);
+		assert_eq!(rows[2].count, 1);
+	}
+
+	#[test]
+	fn logs_with_different_fields_are_not_aggregated() {
+		let mut app = App::default();
+		app.logs
+			.push_back(log_fixture("server", "ready", &[("id", "1")]));
+		app.logs
+			.push_back(log_fixture("server", "ready", &[("id", "2")]));
+		let rows = app.visible_log_rows();
+		assert_eq!(rows.len(), 2);
+		let detail = log_detail_fields(&rows);
+		assert_eq!(detail[0], vec![("id".to_string(), "1".to_string())]);
+		assert_eq!(detail[1], vec![("id".to_string(), "2".to_string())]);
+	}
+
+	#[test]
+	fn log_detail_fields_stay_empty_without_differences() {
+		let mut app = App::default();
+		app.logs
+			.push_back(log_fixture("server", "ready", &[("id", "1")]));
+		app.logs
+			.push_back(log_fixture("tun", "ready", &[("id", "2")]));
+		let rows = app.visible_log_rows();
+		assert!(log_detail_fields(&rows).iter().all(Vec::is_empty));
+	}
+
+	#[test]
+	fn wrapped_lines_count_and_split_by_width() {
+		assert_eq!(wrapped_line_count("", 10), 1);
+		assert_eq!(wrapped_line_count("short", 10), 1);
+		assert_eq!(wrapped_line_count("abcdefghijklmnop", 8), 2);
+		assert_eq!(
+			wrap_text("abcdefghijklmnop", 8),
+			vec!["abcdefgh", "ijklmnop"]
+		);
+		assert_eq!(
+			log_row_height(
+				&LogRow {
+					entry: log_fixture("t", "abcdefghijklmnop", &[]),
+					first_time: None,
+					count: 1,
+				},
+				10,
+			),
+			3
+		);
+	}
+
+	#[test]
+	fn log_selection_opens_detail_and_pauses_follow() {
+		let mut app = populated_app();
+		app.page = Page::Logs;
+		assert!(app.follow_logs);
+		handle_key(&mut app, KeyCode::Char('j'));
+		assert!(!app.follow_logs);
+		handle_key(&mut app, KeyCode::Enter);
+		assert!(app.detail);
+		let rendered = render_text(&mut app, 100, 32);
+		assert!(rendered.contains("LOG DETAILS"));
+		assert!(rendered.contains("proxy server is ready"));
+		handle_key(&mut app, KeyCode::Esc);
+		assert!(!app.detail);
+		handle_key(&mut app, KeyCode::Char(' '));
+		assert!(app.follow_logs);
+	}
+
+	#[test]
+	fn logs_render_aggregated_count_and_full_target() {
+		let mut app = populated_app();
+		app.page = Page::Logs;
+		let target = "a.very.long.target.name.that.exceeds.eighteen.characters";
+		for _ in 0..2 {
+			app.logs
+				.push_back(log_fixture(target, "repeated message", &[]));
+		}
+		let rendered = render_text(&mut app, 120, 30);
+		assert!(rendered.contains("×2"));
+		assert!(rendered.contains(target));
+		assert!(rendered.contains("repeated message"));
+	}
+
+	#[test]
+	fn log_messages_wrap_instead_of_truncating() {
+		let mut app = populated_app();
+		app.page = Page::Logs;
+		let message = format!("{}{}", "a".repeat(80), "TAIL-MARKER");
+		app.logs.push_back(log_fixture("t", &message, &[]));
+		let rendered = render_text(&mut app, 90, 24);
+		// Terminal 90 minus inset (2), block borders (2), and message indent (2).
+		let parts = wrap_text(&message, 90 - 6);
+		assert!(parts.len() > 1);
+		for part in &parts {
+			assert!(
+				rendered.contains(part.as_str()),
+				"missing wrapped part: {part}"
+			);
+		}
+	}
+
+	#[test]
+	fn differing_fields_render_on_log_rows() {
+		let mut app = populated_app();
+		app.page = Page::Logs;
+		app.logs
+			.push_back(log_fixture("server", "dial", &[("peer", "alpha")]));
+		app.logs
+			.push_back(log_fixture("server", "dial", &[("peer", "beta")]));
+		let rendered = render_text(&mut app, 120, 30);
+		assert!(rendered.contains("peer=alpha"));
+		assert!(rendered.contains("peer=beta"));
+	}
+
+	fn log_fixture(target: &str, message: &str, fields: &[(&str, &str)]) -> LogEntry {
+		LogEntry {
+			level: "INFO".to_string(),
+			target: target.to_string(),
+			message: message.to_string(),
+			fields: fields
+				.iter()
+				.map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+				.collect(),
+			..LogEntry::default()
+		}
 	}
 
 	fn populated_app() -> App {

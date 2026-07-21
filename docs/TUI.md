@@ -44,12 +44,14 @@ When `PUPPY_TUI_TOKEN` is unset, the client sends no authentication header. Use 
 | Key | Action |
 |---|---|
 | `1`–`4` | Open Overview, Connections, Traffic, or Logs |
-| `j`/`k`, arrow keys, PageUp/PageDown | Move or scroll |
+| `j`/`k`, arrow keys, PageUp/PageDown | Move or scroll (moving in Logs pauses following) |
 | `/` | Search connections or logs |
 | `f` | Cycle the connection status filter |
 | `s` | Open the connection sort picker: newest, oldest, status, or total traffic |
 | `g` | Toggle individual connections or aggregation by target URL |
 | `l` | Cycle the minimum log level |
-| `Enter` / `Esc` | Open / close connection details |
+| `Enter` / `Esc` | Open / close connection or log details |
 | `Space` | Pause or resume log following |
 | `?` / `q` | Open help / quit |
+
+Adjacent log entries that are fully identical (level, target, message, and fields) are aggregated into a single row with a `×N` count. When entries look the same in the list but differ in their fields, the differing fields are shown on the row as `key=value` pairs. Each log row uses two lines: a metadata line and the full, wrapped message.
