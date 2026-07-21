@@ -110,10 +110,16 @@ async fn run(config_path: &std::path::Path) -> Result<(), anyhow::Error> {
 			}
 		});
 		let addr = format!("{}:{}", grpc.listen_address, grpc.listen_port).parse()?;
-		let cert = tokio::fs::read(resolve_path(config_path, &grpc.tls_cert_file)).await?;
-		let key = tokio::fs::read(resolve_path(config_path, &grpc.tls_key_file)).await?;
+		let identity = if grpc.tls_cert_file.is_empty() {
+			None
+		} else {
+			let cert = tokio::fs::read(resolve_path(config_path, &grpc.tls_cert_file)).await?;
+			let key = tokio::fs::read(resolve_path(config_path, &grpc.tls_key_file)).await?;
+			Some(Identity::from_pem(cert, key))
+		};
 		let interceptor = BearerAuth {
-			expected: Arc::new(format!("Bearer {}", grpc.token).into_bytes()),
+			expected: (!grpc.token.is_empty())
+				.then(|| Arc::new(format!("Bearer {}", grpc.token).into_bytes())),
 		};
 		let (mut health_reporter, health_service) = tonic_health::server::health_reporter();
 		health_reporter
@@ -140,7 +146,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), anyhow::Error> {
 		});
 		grpc_runtime = Some((
 			addr,
-			Identity::from_pem(cert, key),
+			identity,
 			ObservabilityServer::with_interceptor(service, interceptor),
 			health_service,
 		));
@@ -168,8 +174,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), anyhow::Error> {
 	let mut grpc_task = grpc_runtime.map(|(addr, identity, service, health_service)| {
 		let grpc_cancel = cancel.clone();
 		tokio::spawn(async move {
-			Server::builder()
-				.tls_config(ServerTlsConfig::new().identity(identity))?
+			let mut builder = Server::builder();
+			if let Some(identity) = identity {
+				builder = builder.tls_config(ServerTlsConfig::new().identity(identity))?;
+			}
+			builder
 				.add_service(health_service)
 				.add_service(service)
 				.serve_with_shutdown(addr, grpc_cancel.cancelled_owned())
@@ -224,17 +233,20 @@ fn now_ms() -> i64 {
 
 #[derive(Clone)]
 struct BearerAuth {
-	expected: Arc<Vec<u8>>,
+	expected: Option<Arc<Vec<u8>>>,
 }
 
 impl Interceptor for BearerAuth {
 	fn call(&mut self, request: Request<()>) -> Result<Request<()>, Status> {
+		let Some(expected) = &self.expected else {
+			return Ok(request);
+		};
 		let supplied = request
 			.metadata()
 			.get("authorization")
 			.map(MetadataValue::as_encoded_bytes)
 			.unwrap_or_default();
-		if supplied.ct_eq(self.expected.as_slice()).into() {
+		if supplied.ct_eq(expected.as_slice()).into() {
 			Ok(request)
 		} else {
 			Err(Status::unauthenticated("unauthorized"))

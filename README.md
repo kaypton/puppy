@@ -62,14 +62,14 @@ cd rust && cargo build --release --bin puppy-server --target aarch64-apple-darwi
 
 ### 编译和运行 TUI
 
-`puppy-tui` 是独立的 Ratatui 客户端，通过 TLS gRPC 连接 `puppy-server`：
+`puppy-tui` 是独立的 Ratatui 客户端，通过 gRPC 连接 `puppy-server`。TLS 与 Bearer Token 均为可选能力：
 
 ```bash
 make tui-build
 PUPPY_TUI_TOKEN='配置中的 token' make tui-run ARGS="--endpoint https://127.0.0.1:50051 --ca-cert ./certs/proxy-cert.pem"
 ```
 
-未设置 `PUPPY_TUI_TOKEN` 时会安全提示输入。自签名证书必须通过 `--ca-cert` 显式信任；证书名称与连接地址不一致时可补充 `--server-name`。
+未设置 `PUPPY_TUI_TOKEN` 时客户端不发送认证头。明文服务使用 `http://`；TLS 服务使用 `https://`，自签名证书通过 `--ca-cert` 显式信任，证书名称不一致时可补充 `--server-name`。
 
 ### 常用 Make 目标速查
 

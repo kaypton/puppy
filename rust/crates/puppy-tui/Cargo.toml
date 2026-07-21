@@ -21,4 +21,3 @@ crossterm = { workspace = true }
 futures-util = { workspace = true }
 rustls-native-certs = { workspace = true }
 anyhow = { workspace = true }
-rpassword = "7"

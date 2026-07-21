@@ -37,7 +37,7 @@ use tonic::Request;
 	about = "Puppy gRPC observability terminal UI"
 )]
 struct Cli {
-	#[arg(long, default_value = "https://127.0.0.1:50051")]
+	#[arg(long, default_value = "http://127.0.0.1:50051")]
 	endpoint: String,
 	#[arg(long, value_name = "PEM")]
 	ca_cert: Option<PathBuf>,
@@ -212,10 +212,9 @@ impl App {
 #[tokio::main]
 async fn main() -> Result<()> {
 	let cli = Cli::parse();
-	let token = match std::env::var("PUPPY_TUI_TOKEN") {
-		Ok(value) if !value.is_empty() => value,
-		_ => rpassword::prompt_password("Puppy Bearer token: ")?,
-	};
+	let token = std::env::var("PUPPY_TUI_TOKEN")
+		.ok()
+		.filter(|value| !value.is_empty());
 	let (tx, mut rx) = mpsc::channel(1_024);
 	tokio::spawn(connection_loop(cli, token, tx));
 
@@ -248,7 +247,7 @@ async fn main() -> Result<()> {
 	result
 }
 
-async fn connection_loop(cli: Cli, token: String, tx: mpsc::Sender<NetworkEvent>) {
+async fn connection_loop(cli: Cli, token: Option<String>, tx: mpsc::Sender<NetworkEvent>) {
 	let mut delay = Duration::from_millis(500);
 	loop {
 		match connect_client(&cli, &token).await {
@@ -278,35 +277,42 @@ async fn connection_loop(cli: Cli, token: String, tx: mpsc::Sender<NetworkEvent>
 #[derive(Clone)]
 struct AuthClient {
 	inner: ObservabilityClient<Channel>,
-	token: MetadataValue<tonic::metadata::Ascii>,
+	token: Option<MetadataValue<tonic::metadata::Ascii>>,
 }
 
 impl AuthClient {
 	fn request<T>(&self, value: T) -> Request<T> {
 		let mut request = Request::new(value);
-		request
-			.metadata_mut()
-			.insert("authorization", self.token.clone());
+		if let Some(token) = &self.token {
+			request
+				.metadata_mut()
+				.insert("authorization", token.clone());
+		}
 		request
 	}
 }
 
-async fn connect_client(cli: &Cli, token: &str) -> Result<AuthClient> {
-	let mut tls = ClientTlsConfig::new();
-	if let Some(path) = &cli.ca_cert {
-		tls = tls.ca_certificate(Certificate::from_pem(
-			tokio::fs::read(path).await.context("读取 CA 证书")?,
-		));
+async fn connect_client(cli: &Cli, token: &Option<String>) -> Result<AuthClient> {
+	let mut endpoint = Endpoint::from_shared(cli.endpoint.clone())?;
+	if cli.endpoint.starts_with("https://") {
+		let mut tls = ClientTlsConfig::new();
+		if let Some(path) = &cli.ca_cert {
+			tls = tls.ca_certificate(Certificate::from_pem(
+				tokio::fs::read(path).await.context("读取 CA 证书")?,
+			));
+		}
+		if let Some(name) = &cli.server_name {
+			tls = tls.domain_name(name);
+		}
+		endpoint = endpoint.tls_config(tls)?;
+	} else if cli.ca_cert.is_some() || cli.server_name.is_some() {
+		anyhow::bail!("--ca-cert/--server-name 只能用于 https:// endpoint");
 	}
-	if let Some(name) = &cli.server_name {
-		tls = tls.domain_name(name);
-	}
-	let channel = Endpoint::from_shared(cli.endpoint.clone())?
-		.tls_config(tls)?
-		.connect()
-		.await?;
-	let token = format!("Bearer {token}")
-		.parse()
+	let channel = endpoint.connect().await?;
+	let token = token
+		.as_ref()
+		.map(|token| format!("Bearer {token}").parse())
+		.transpose()
 		.context("token 不是合法的 gRPC metadata")?;
 	Ok(AuthClient {
 		inner: ObservabilityClient::new(channel),

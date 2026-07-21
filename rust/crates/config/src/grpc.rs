@@ -31,13 +31,11 @@ impl GrpcConfiguration {
 		if self.listen_port == 0 {
 			return Err("grpc: listen_port is required when enabled".to_string());
 		}
-		if self.tls_cert_file.is_empty() || self.tls_key_file.is_empty() {
+		if self.tls_cert_file.is_empty() != self.tls_key_file.is_empty() {
 			return Err(
-				"grpc: tls_cert_file and tls_key_file are required when enabled".to_string(),
+				"grpc: tls_cert_file and tls_key_file must both be set or both be empty"
+					.to_string(),
 			);
-		}
-		if self.token.is_empty() {
-			return Err("grpc: token is required when enabled".to_string());
 		}
 		Ok(())
 	}

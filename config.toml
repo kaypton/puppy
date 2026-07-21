@@ -252,13 +252,13 @@ listen_address = "127.0.0.1"
 # listen_port 是 gRPC 管理面监听的 TCP 端口。
 listen_port = 50051
 
-# tls_cert_file 和 tls_key_file 启用 HTTPS。两项必须同时配置或同时省略。
+# tls_cert_file 和 tls_key_file 启用 TLS gRPC。两项必须同时配置或同时省略。
 # 建议启用 HTTPS 以保护 token 和数据。可复用 proxy 的证书，或单独生成。
 # 省略时使用明文 HTTP（不推荐，除非仅本地访问且不配置 token）。
 tls_cert_file = "./certs/proxy-cert.pem"
 tls_key_file = "./certs/proxy-key.pem"
 
-# token 是 Bearer 认证令牌。非空时所有 API 请求必须携带
+# token 是 Bearer 认证令牌。非空时所有观测 RPC 请求必须携带
 # Authorization: Bearer <token> 头。留空时关闭认证（仅建议本地监听时使用）。
 # 生产环境请使用足够长的随机字符串。
 token = "replace-with-a-long-random-token"

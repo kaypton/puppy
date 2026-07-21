@@ -475,6 +475,26 @@ fn load_configuration_with_grpc() {
 }
 
 #[test]
+fn load_configuration_allows_plaintext_grpc_without_token() {
+	let contents = format!(
+		"{VALID_CONFIGURATION}\n[grpc]\nenabled = true\nlisten_address = \"127.0.0.1\"\nlisten_port = 50051\n[observability]\ndatabase_path = \"puppy.db\"\nlog_directory = \"logs\"\n"
+	);
+	let cfg = load_str(&contents).expect("load optional gRPC security");
+	let grpc = cfg.grpc.expect("grpc present");
+	assert!(grpc.tls_cert_file.is_empty());
+	assert!(grpc.token.is_empty());
+}
+
+#[test]
+fn load_configuration_rejects_half_configured_grpc_tls() {
+	let contents = format!(
+		"{VALID_CONFIGURATION}\n[grpc]\nenabled = true\nlisten_address = \"127.0.0.1\"\nlisten_port = 50051\ntls_cert_file = \"server.pem\"\n[observability]\ndatabase_path = \"puppy.db\"\nlog_directory = \"logs\"\n"
+	);
+	let error = load_str(&contents).unwrap_err().to_string();
+	assert!(error.contains("must both be set or both be empty"));
+}
+
+#[test]
 fn load_configuration_rejects_unknown_grpc_field() {
 	let contents =
 		format!("{VALID_CONFIGURATION}\n[grpc]\nenabled = false\nunknown_field = \"bad\"\n");
