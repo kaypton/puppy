@@ -46,7 +46,9 @@ When `PUPPY_TUI_TOKEN` is unset, the client sends no authentication header. Use 
 | `1`–`4` | Open Overview, Connections, Traffic, or Logs |
 | `j`/`k`, arrow keys, PageUp/PageDown | Move or scroll |
 | `/` | Search connections or logs |
-| `f` / `s` | Filter connection status / change time sort order |
+| `f` | Cycle the connection status filter |
+| `s` | Open the connection sort picker: newest, oldest, status, or total traffic |
+| `g` | Toggle individual connections or aggregation by target URL |
 | `l` | Cycle the minimum log level |
 | `Enter` / `Esc` | Open / close connection details |
 | `Space` | Pause or resume log following |

@@ -1,4 +1,5 @@
-use std::collections::{HashMap, VecDeque};
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -78,6 +79,70 @@ impl Page {
 	}
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConnectionSort {
+	Newest,
+	Oldest,
+	Status,
+	Traffic,
+}
+
+impl ConnectionSort {
+	const ALL: [Self; 4] = [Self::Newest, Self::Oldest, Self::Status, Self::Traffic];
+
+	fn label(self) -> &'static str {
+		match self {
+			Self::Newest => "Newest",
+			Self::Oldest => "Oldest",
+			Self::Status => "Status",
+			Self::Traffic => "Total Traffic",
+		}
+	}
+
+	fn toolbar_label(self) -> &'static str {
+		match self {
+			Self::Traffic => "Traffic",
+			_ => self.label(),
+		}
+	}
+
+	fn index(self) -> usize {
+		Self::ALL
+			.iter()
+			.position(|value| *value == self)
+			.unwrap_or(0)
+	}
+}
+
+#[derive(Debug)]
+struct ConnectionGroup {
+	target_url: String,
+	total: usize,
+	active: usize,
+	interrupted: usize,
+	clients: HashSet<String>,
+	bytes_in: u64,
+	bytes_out: u64,
+	first_started: i64,
+	last_started: i64,
+}
+
+impl ConnectionGroup {
+	fn status(&self) -> i32 {
+		if self.active > 0 {
+			ConnectionStatus::Active as i32
+		} else if self.interrupted > 0 {
+			ConnectionStatus::Interrupted as i32
+		} else {
+			ConnectionStatus::Closed as i32
+		}
+	}
+
+	fn traffic(&self) -> u64 {
+		self.bytes_in.saturating_add(self.bytes_out)
+	}
+}
+
 enum NetworkEvent {
 	Connected,
 	Disconnected(String),
@@ -104,7 +169,10 @@ struct App {
 	log_query: String,
 	min_log_level: String,
 	status_filter: i32,
-	descending: bool,
+	connection_sort: ConnectionSort,
+	group_connections: bool,
+	sort_menu: bool,
+	sort_menu_selected: usize,
 	follow_logs: bool,
 	help: bool,
 	detail: bool,
@@ -127,7 +195,10 @@ impl Default for App {
 			log_query: String::new(),
 			min_log_level: "TRACE".to_string(),
 			status_filter: ConnectionStatus::Unspecified as i32,
-			descending: true,
+			connection_sort: ConnectionSort::Newest,
+			group_connections: false,
+			sort_menu: false,
+			sort_menu_selected: 0,
 			follow_logs: true,
 			help: false,
 			detail: false,
@@ -185,10 +256,9 @@ impl App {
 		}
 	}
 
-	fn visible_connections(&self) -> Vec<&Connection> {
+	fn filtered_connections(&self) -> Vec<&Connection> {
 		let query = self.query.to_lowercase();
-		let mut values: Vec<_> = self
-			.connections
+		self.connections
 			.values()
 			.filter(|connection| {
 				(self.status_filter == ConnectionStatus::Unspecified as i32
@@ -196,19 +266,61 @@ impl App {
 					&& (query.is_empty()
 						|| connection.id.to_lowercase().contains(&query)
 						|| connection.remote_addr.to_lowercase().contains(&query)
-						|| connection.target_host.to_lowercase().contains(&query))
+						|| connection.target_host.to_lowercase().contains(&query)
+						|| connection.protocol.to_lowercase().contains(&query))
 			})
-			.collect();
-		values.sort_by_key(|connection| {
-			connection
-				.started_at
-				.as_ref()
-				.map_or(0, |time| time.seconds)
-		});
-		if self.descending {
-			values.reverse();
-		}
+			.collect()
+	}
+
+	fn visible_connections(&self) -> Vec<&Connection> {
+		let mut values = self.filtered_connections();
+		values.sort_by(|left, right| compare_connections(left, right, self.connection_sort));
 		values
+	}
+
+	fn visible_connection_groups(&self) -> Vec<ConnectionGroup> {
+		let mut grouped: HashMap<String, ConnectionGroup> = HashMap::new();
+		for connection in self.filtered_connections() {
+			let target_url = connection_target_url(connection);
+			let started = connection_started(connection);
+			let group = grouped
+				.entry(target_url.clone())
+				.or_insert_with(|| ConnectionGroup {
+					target_url,
+					total: 0,
+					active: 0,
+					interrupted: 0,
+					clients: HashSet::new(),
+					bytes_in: 0,
+					bytes_out: 0,
+					first_started: started,
+					last_started: started,
+				});
+			group.total = group.total.saturating_add(1);
+			match ConnectionStatus::try_from(connection.status).unwrap_or_default() {
+				ConnectionStatus::Active => group.active = group.active.saturating_add(1),
+				ConnectionStatus::Interrupted => {
+					group.interrupted = group.interrupted.saturating_add(1)
+				}
+				_ => {}
+			}
+			group.clients.insert(connection.remote_addr.clone());
+			group.bytes_in = group.bytes_in.saturating_add(connection.bytes_in);
+			group.bytes_out = group.bytes_out.saturating_add(connection.bytes_out);
+			group.first_started = group.first_started.min(started);
+			group.last_started = group.last_started.max(started);
+		}
+		let mut groups: Vec<_> = grouped.into_values().collect();
+		groups.sort_by(|left, right| compare_connection_groups(left, right, self.connection_sort));
+		groups
+	}
+
+	fn connection_row_count(&self) -> usize {
+		if self.group_connections {
+			self.visible_connection_groups().len()
+		} else {
+			self.visible_connections().len()
+		}
 	}
 
 	fn visible_logs(&self) -> Vec<&LogEntry> {
@@ -422,6 +534,27 @@ async fn run_connected(client: &mut AuthClient, tx: &mpsc::Sender<NetworkEvent>)
 }
 
 fn handle_key(app: &mut App, code: KeyCode) -> bool {
+	if app.sort_menu {
+		match code {
+			KeyCode::Esc | KeyCode::Char('s') => app.sort_menu = false,
+			KeyCode::Up | KeyCode::Char('k') => {
+				app.sort_menu_selected = app.sort_menu_selected.saturating_sub(1)
+			}
+			KeyCode::Down | KeyCode::Char('j') => {
+				app.sort_menu_selected = app
+					.sort_menu_selected
+					.saturating_add(1)
+					.min(ConnectionSort::ALL.len() - 1)
+			}
+			KeyCode::Char(value @ '1'..='4') => {
+				app.sort_menu_selected = value as usize - '1' as usize;
+				apply_connection_sort(app);
+			}
+			KeyCode::Enter => apply_connection_sort(app),
+			_ => {}
+		}
+		return false;
+	}
 	if app.searching {
 		match code {
 			KeyCode::Esc | KeyCode::Enter => app.searching = false,
@@ -474,7 +607,15 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 			app.selected = 0;
 			app.connection_offset = 0;
 		}
-		KeyCode::Char('s') if app.page == Page::Connections => app.descending = !app.descending,
+		KeyCode::Char('s') if app.page == Page::Connections => {
+			app.sort_menu_selected = app.connection_sort.index();
+			app.sort_menu = true;
+		}
+		KeyCode::Char('g') if app.page == Page::Connections => {
+			app.group_connections = !app.group_connections;
+			app.selected = 0;
+			app.connection_offset = 0;
+		}
 		KeyCode::Char(' ') if app.page == Page::Logs => {
 			app.follow_logs = !app.follow_logs;
 			if !app.follow_logs {
@@ -493,7 +634,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 		}
 		KeyCode::Down | KeyCode::Char('j') => {
 			let last = match app.page {
-				Page::Connections => app.visible_connections().len().saturating_sub(1),
+				Page::Connections => app.connection_row_count().saturating_sub(1),
 				Page::Logs => app.visible_logs().len().saturating_sub(1),
 				_ => app.selected,
 			};
@@ -502,14 +643,19 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 		KeyCode::Up | KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
 		KeyCode::PageDown => app.selected = app.selected.saturating_add(10),
 		KeyCode::PageUp => app.selected = app.selected.saturating_sub(10),
-		KeyCode::Enter
-			if app.page == Page::Connections && !app.visible_connections().is_empty() =>
-		{
+		KeyCode::Enter if app.page == Page::Connections && app.connection_row_count() > 0 => {
 			app.detail = true
 		}
 		_ => {}
 	}
 	false
+}
+
+fn apply_connection_sort(app: &mut App) {
+	app.connection_sort = ConnectionSort::ALL[app.sort_menu_selected];
+	app.sort_menu = false;
+	app.selected = 0;
+	app.connection_offset = 0;
 }
 
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
@@ -550,6 +696,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
 	}
 	if app.detail {
 		draw_detail(frame, centered(76, 76, size), app);
+	}
+	if app.sort_menu {
+		draw_sort_menu(frame, centered(44, 54, size), app);
 	}
 }
 
@@ -653,8 +802,8 @@ fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	match app.page {
 		Page::Connections => {
 			hints.extend(key_hint("/", "Search"));
-			hints.extend(key_hint("f", "Filter"));
-			hints.extend(key_hint("↵", "Details"));
+			hints.extend(key_hint("s", "Sort"));
+			hints.extend(key_hint("g", "Group"));
 		}
 		Page::Logs => {
 			hints.extend(key_hint("/", "Search"));
@@ -828,7 +977,8 @@ fn metric_card(
 }
 
 fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
-	let value_count = app.visible_connections().len();
+	let raw_count = app.filtered_connections().len();
+	let value_count = app.connection_row_count();
 	app.selected = app.selected.min(value_count.saturating_sub(1));
 	let selected = app.selected;
 	let filter = match app.status_filter {
@@ -848,7 +998,6 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 	app.connection_offset =
 		connection_viewport_offset(app.connection_offset, selected, value_count, visible_rows);
 	let connection_offset = app.connection_offset;
-	let values = app.visible_connections();
 	let search = if app.searching {
 		format!("{}▌", app.query)
 	} else if app.query.is_empty() {
@@ -859,24 +1008,43 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 	let toolbar_color = if app.searching { YELLOW } else { BORDER };
 	frame.render_widget(
 		Paragraph::new(Line::from(vec![
-			Span::styled(" SEARCH ", Style::default().fg(MUTED).bold()),
+			Span::styled(" FIND ", Style::default().fg(MUTED).bold()),
 			Span::styled(search, Style::default().fg(TEXT)),
-			Span::styled("    FILTER ", Style::default().fg(MUTED).bold()),
+			Span::styled("  STATUS ", Style::default().fg(MUTED).bold()),
 			Span::styled(format!(" {filter} "), chip_style(CYAN)),
-			Span::styled("    SORT ", Style::default().fg(MUTED).bold()),
+			Span::styled("  SORT ", Style::default().fg(MUTED).bold()),
 			Span::styled(
-				if app.descending {
-					" Newest "
-				} else {
-					" Oldest "
-				},
+				format!(" {} ", app.connection_sort.toolbar_label()),
 				chip_style(BLUE),
+			),
+			Span::styled("  VIEW ", Style::default().fg(MUTED).bold()),
+			Span::styled(
+				if app.group_connections {
+					" Targets "
+				} else {
+					" Individual "
+				},
+				chip_style(MAGENTA),
 			),
 		]))
 		.style(Style::default().bg(SURFACE))
 		.block(panel("CONNECTION EXPLORER", toolbar_color)),
 		layout[0],
 	);
+	if app.group_connections {
+		let groups = app.visible_connection_groups();
+		draw_connection_groups(
+			frame,
+			layout[2],
+			&groups,
+			selected,
+			connection_offset,
+			visible_rows,
+			raw_count,
+		);
+		return;
+	}
+	let values = app.visible_connections();
 	let compact = layout[2].width < 110;
 	let rows = values
 		.iter()
@@ -962,6 +1130,113 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
 			.column_spacing(1)
 			.block(panel(&format!("CONNECTIONS  {value_count}"), CYAN)),
 		layout[2],
+	);
+}
+
+fn draw_connection_groups(
+	frame: &mut Frame<'_>,
+	area: Rect,
+	groups: &[ConnectionGroup],
+	selected: usize,
+	offset: usize,
+	visible_rows: usize,
+	raw_count: usize,
+) {
+	let compact = area.width < 110;
+	let rows = groups
+		.iter()
+		.enumerate()
+		.skip(offset)
+		.take(visible_rows)
+		.map(|(index, group)| {
+			let mut cells = vec![
+				Cell::from(if index == selected { "▌" } else { "" })
+					.style(Style::default().fg(CYAN)),
+				Cell::from(group.target_url.clone()),
+				Cell::from(status_name(group.status()))
+					.style(connection_status_style(group.status())),
+				Cell::from(group.total.to_string()),
+				Cell::from(group.active.to_string()).style(Style::default().fg(GREEN)),
+			];
+			if !compact {
+				cells.push(Cell::from(group.clients.len().to_string()));
+			}
+			cells.extend([
+				Cell::from(bytes(group.bytes_in)).style(Style::default().fg(CYAN)),
+				Cell::from(bytes(group.bytes_out)).style(Style::default().fg(MAGENTA)),
+			]);
+			let row = Row::new(cells);
+			if index == selected {
+				row.style(Style::default().fg(TEXT).bg(SURFACE_ALT).bold())
+			} else if index % 2 == 1 {
+				row.style(Style::default().fg(TEXT).bg(SURFACE))
+			} else {
+				row.style(Style::default().fg(TEXT).bg(BACKGROUND))
+			}
+		});
+	let (widths, labels) = if compact {
+		(
+			vec![
+				Constraint::Length(1),
+				Constraint::Min(20),
+				Constraint::Length(10),
+				Constraint::Length(6),
+				Constraint::Length(6),
+				Constraint::Length(9),
+				Constraint::Length(9),
+			],
+			vec![
+				"",
+				"Target URL",
+				"Status",
+				"Total",
+				"Active",
+				"Inbound",
+				"Outbound",
+			],
+		)
+	} else {
+		(
+			vec![
+				Constraint::Length(1),
+				Constraint::Min(28),
+				Constraint::Length(10),
+				Constraint::Length(7),
+				Constraint::Length(7),
+				Constraint::Length(8),
+				Constraint::Length(11),
+				Constraint::Length(11),
+			],
+			vec![
+				"",
+				"Target URL",
+				"Status",
+				"Total",
+				"Active",
+				"Clients",
+				"Inbound",
+				"Outbound",
+			],
+		)
+	};
+	let header = Row::new(labels).style(
+		Style::default()
+			.fg(MUTED)
+			.bg(SURFACE_ALT)
+			.add_modifier(Modifier::BOLD),
+	);
+	frame.render_widget(
+		Table::new(rows, widths)
+			.header(header)
+			.column_spacing(1)
+			.block(panel(
+				&format!(
+					"TARGET GROUPS  {}  ·  {raw_count} CONNECTIONS",
+					groups.len()
+				),
+				MAGENTA,
+			)),
+		area,
 	);
 }
 
@@ -1177,7 +1452,8 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 			help_line("PgUp / PgDn", "Move ten rows at a time"),
 			help_line("/", "Search connections or logs"),
 			help_line("f", "Cycle the connection status filter"),
-			help_line("s", "Reverse the connection sort order"),
+			help_line("s", "Choose the connection sort order"),
+			help_line("g", "Group connections by target URL"),
 			help_line("l", "Cycle the minimum log level"),
 			help_line("Space", "Pause or resume log following"),
 			help_line("Enter", "Open connection details"),
@@ -1192,6 +1468,10 @@ fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 }
 
 fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
+	if app.group_connections {
+		draw_connection_group_detail(frame, area, app);
+		return;
+	}
 	let values = app.visible_connections();
 	let Some(value) = values.get(app.selected.min(values.len().saturating_sub(1))) else {
 		return;
@@ -1236,6 +1516,95 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	);
 }
 
+fn draw_connection_group_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
+	let groups = app.visible_connection_groups();
+	let Some(group) = groups.get(app.selected.min(groups.len().saturating_sub(1))) else {
+		return;
+	};
+	frame.render_widget(Clear, area);
+	frame.render_widget(
+		Paragraph::new(vec![
+			detail_line("Target URL", group.target_url.clone()),
+			detail_line("Status", status_name(group.status()).to_string()),
+			detail_line("Connections", group.total.to_string()),
+			detail_line("Active", group.active.to_string()),
+			detail_line(
+				"Closed / Interrupted",
+				format!(
+					"{} / {}",
+					group
+						.total
+						.saturating_sub(group.active)
+						.saturating_sub(group.interrupted),
+					group.interrupted
+				),
+			),
+			detail_line("Unique clients", group.clients.len().to_string()),
+			detail_line(
+				"Inbound / Outbound",
+				format!("{} / {}", bytes(group.bytes_in), bytes(group.bytes_out)),
+			),
+			detail_line("Total traffic", bytes(group.traffic())),
+			detail_line("First seen", timestamp_seconds_text(group.first_started)),
+			detail_line("Last seen", timestamp_seconds_text(group.last_started)),
+		])
+		.style(Style::default().fg(TEXT).bg(SURFACE))
+		.block(
+			panel("TARGET GROUP DETAILS", MAGENTA)
+				.title_bottom(Line::styled(
+					" Enter / Esc to close ",
+					Style::default().fg(MUTED),
+				))
+				.padding(Padding::horizontal(2)),
+		)
+		.wrap(Wrap { trim: false }),
+		area,
+	);
+}
+
+fn draw_sort_menu(frame: &mut Frame<'_>, area: Rect, app: &App) {
+	frame.render_widget(Clear, area);
+	let items = ConnectionSort::ALL.iter().enumerate().map(|(index, sort)| {
+		let selected = index == app.sort_menu_selected;
+		let active = *sort == app.connection_sort;
+		ListItem::new(Line::from(vec![
+			Span::styled(
+				if selected { " ▌ " } else { "   " },
+				Style::default().fg(CYAN),
+			),
+			Span::styled(format!("{}  ", index + 1), Style::default().fg(MUTED)),
+			Span::styled(
+				sort.label(),
+				if selected {
+					Style::default().fg(TEXT).bold()
+				} else {
+					Style::default().fg(MUTED)
+				},
+			),
+			Span::styled(
+				if active { "  ✓" } else { "" },
+				Style::default().fg(GREEN).bold(),
+			),
+		]))
+		.style(if selected {
+			Style::default().bg(SURFACE_ALT)
+		} else {
+			Style::default().bg(SURFACE)
+		})
+	});
+	frame.render_widget(
+		List::new(items).block(
+			panel("SORT CONNECTIONS", BLUE)
+				.title_bottom(Line::styled(
+					" Enter Apply  ·  Esc Cancel ",
+					Style::default().fg(MUTED),
+				))
+				.padding(Padding::new(1, 1, 1, 1)),
+		),
+		area,
+	);
+}
+
 fn panel(title: &str, accent: Color) -> Block<'static> {
 	Block::default()
 		.borders(Borders::ALL)
@@ -1271,6 +1640,81 @@ fn detail_line(label: &str, value: String) -> Line<'static> {
 		Span::styled(format!("{label:<20}"), Style::default().fg(MUTED)),
 		Span::styled(value, Style::default().fg(TEXT).bold()),
 	])
+}
+
+fn connection_started(connection: &Connection) -> i64 {
+	connection
+		.started_at
+		.as_ref()
+		.map_or(0, |timestamp| timestamp.seconds)
+}
+
+fn connection_traffic(connection: &Connection) -> u64 {
+	connection.bytes_in.saturating_add(connection.bytes_out)
+}
+
+fn status_sort_rank(status: i32) -> u8 {
+	match ConnectionStatus::try_from(status).unwrap_or_default() {
+		ConnectionStatus::Active => 0,
+		ConnectionStatus::Interrupted => 1,
+		ConnectionStatus::Closed => 2,
+		_ => 3,
+	}
+}
+
+fn compare_connections(left: &Connection, right: &Connection, sort: ConnectionSort) -> Ordering {
+	let order = match sort {
+		ConnectionSort::Newest => connection_started(right).cmp(&connection_started(left)),
+		ConnectionSort::Oldest => connection_started(left).cmp(&connection_started(right)),
+		ConnectionSort::Status => status_sort_rank(left.status)
+			.cmp(&status_sort_rank(right.status))
+			.then_with(|| connection_started(right).cmp(&connection_started(left))),
+		ConnectionSort::Traffic => connection_traffic(right)
+			.cmp(&connection_traffic(left))
+			.then_with(|| connection_started(right).cmp(&connection_started(left))),
+	};
+	order.then_with(|| left.id.cmp(&right.id))
+}
+
+fn compare_connection_groups(
+	left: &ConnectionGroup,
+	right: &ConnectionGroup,
+	sort: ConnectionSort,
+) -> Ordering {
+	let order = match sort {
+		ConnectionSort::Newest => right.last_started.cmp(&left.last_started),
+		ConnectionSort::Oldest => left.first_started.cmp(&right.first_started),
+		ConnectionSort::Status => status_sort_rank(left.status())
+			.cmp(&status_sort_rank(right.status()))
+			.then_with(|| right.last_started.cmp(&left.last_started)),
+		ConnectionSort::Traffic => right
+			.traffic()
+			.cmp(&left.traffic())
+			.then_with(|| right.last_started.cmp(&left.last_started)),
+	};
+	order.then_with(|| left.target_url.cmp(&right.target_url))
+}
+
+fn connection_target_url(connection: &Connection) -> String {
+	let host = if connection.target_host.contains(':') && !connection.target_host.starts_with('[') {
+		format!("[{}]", connection.target_host)
+	} else {
+		connection.target_host.clone()
+	};
+	let authority = format!("{host}:{}", connection.target_port);
+	if connection.protocol.is_empty() {
+		authority
+	} else {
+		format!("{}://{authority}", connection.protocol.to_lowercase())
+	}
+}
+
+fn timestamp_seconds_text(seconds: i64) -> String {
+	if seconds == 0 {
+		"—".to_string()
+	} else {
+		format!("{seconds} Unix")
+	}
 }
 
 fn connection_viewport_offset(
@@ -1494,6 +1938,8 @@ mod tests {
 		app.page = Page::Connections;
 		app.detail = true;
 		assert!(render_text(&mut app, 100, 32).contains("CONNECTION DETAILS"));
+		app.group_connections = true;
+		assert!(render_text(&mut app, 100, 32).contains("TARGET GROUP DETAILS"));
 	}
 
 	#[test]
@@ -1549,6 +1995,91 @@ mod tests {
 		assert_eq!(app.connection_offset, 0);
 	}
 
+	#[test]
+	fn connections_support_all_sort_orders() {
+		let mut app = App::default();
+		for connection in [
+			connection_fixture("old-active", "a.example", ConnectionStatus::Active, 100, 10),
+			connection_fixture("new-closed", "b.example", ConnectionStatus::Closed, 500, 30),
+			connection_fixture(
+				"mid-interrupted",
+				"c.example",
+				ConnectionStatus::Interrupted,
+				300,
+				20,
+			),
+		] {
+			app.connections.insert(connection.id.clone(), connection);
+		}
+		app.connection_sort = ConnectionSort::Newest;
+		assert_eq!(
+			connection_ids(&app),
+			["new-closed", "mid-interrupted", "old-active"]
+		);
+		app.connection_sort = ConnectionSort::Oldest;
+		assert_eq!(
+			connection_ids(&app),
+			["old-active", "mid-interrupted", "new-closed"]
+		);
+		app.connection_sort = ConnectionSort::Status;
+		assert_eq!(
+			connection_ids(&app),
+			["old-active", "mid-interrupted", "new-closed"]
+		);
+		app.connection_sort = ConnectionSort::Traffic;
+		assert_eq!(
+			connection_ids(&app),
+			["new-closed", "mid-interrupted", "old-active"]
+		);
+	}
+
+	#[test]
+	fn connections_group_by_target_url() {
+		let mut app = App::default();
+		let mut first =
+			connection_fixture("first", "example.com", ConnectionStatus::Active, 100, 10);
+		first.protocol = "https".to_string();
+		first.remote_addr = "127.0.0.1:1001".to_string();
+		let mut second =
+			connection_fixture("second", "example.com", ConnectionStatus::Closed, 250, 20);
+		second.protocol = "https".to_string();
+		second.remote_addr = "127.0.0.1:1002".to_string();
+		let other = connection_fixture("other", "other.example", ConnectionStatus::Closed, 50, 30);
+		for connection in [first, second, other] {
+			app.connections.insert(connection.id.clone(), connection);
+		}
+		let groups = app.visible_connection_groups();
+		assert_eq!(groups.len(), 2);
+		let group = groups
+			.iter()
+			.find(|group| group.target_url == "https://example.com:443")
+			.expect("grouped target");
+		assert_eq!(group.total, 2);
+		assert_eq!(group.active, 1);
+		assert_eq!(group.clients.len(), 2);
+		assert_eq!(group.traffic(), 350);
+		assert_eq!(group.status(), ConnectionStatus::Active as i32);
+	}
+
+	#[test]
+	fn sort_picker_and_group_toggle_use_keyboard_controls() {
+		let mut app = populated_app();
+		app.page = Page::Connections;
+		handle_key(&mut app, KeyCode::Char('s'));
+		assert!(app.sort_menu);
+		assert!(render_text(&mut app, 80, 24).contains("SORT CONNECTIONS"));
+		handle_key(&mut app, KeyCode::Down);
+		handle_key(&mut app, KeyCode::Down);
+		handle_key(&mut app, KeyCode::Enter);
+		assert_eq!(app.connection_sort, ConnectionSort::Status);
+		assert!(!app.sort_menu);
+		handle_key(&mut app, KeyCode::Char('g'));
+		assert!(app.group_connections);
+		let rendered = render_text(&mut app, 80, 24);
+		assert!(rendered.contains("TARGET GROUPS"));
+		assert!(rendered.contains("https://example.com:443"));
+	}
+
 	fn populated_app() -> App {
 		let mut app = App {
 			connected: true,
@@ -1602,6 +2133,34 @@ mod tests {
 			..LogEntry::default()
 		});
 		app
+	}
+
+	fn connection_fixture(
+		id: &str,
+		target: &str,
+		status: ConnectionStatus,
+		traffic: u64,
+		started: i64,
+	) -> Connection {
+		Connection {
+			id: id.to_string(),
+			status: status as i32,
+			target_host: target.to_string(),
+			target_port: 443,
+			bytes_in: traffic,
+			started_at: Some(prost_types::Timestamp {
+				seconds: started,
+				nanos: 0,
+			}),
+			..Connection::default()
+		}
+	}
+
+	fn connection_ids(app: &App) -> Vec<&str> {
+		app.visible_connections()
+			.into_iter()
+			.map(|connection| connection.id.as_str())
+			.collect()
 	}
 
 	fn render_text(app: &mut App, width: u16, height: u16) -> String {
