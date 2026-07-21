@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -1355,28 +1355,22 @@ fn draw_rate_chart(
 	samples: &VecDeque<TrafficSample>,
 	value: fn(&TrafficSample) -> u64,
 ) {
-	let interval_seconds = samples
-		.back()
-		.map_or(1.0, |sample| sample.interval_ms.max(1) as f64 / 1_000.0);
-	let history_seconds = if samples.len() > 1 {
-		(samples.len() - 1) as f64 * interval_seconds
-	} else {
-		interval_seconds
-	};
+	let [start_time, end_time] = traffic_time_bounds(samples);
 	let point_capacity = area.width.saturating_sub(14).max(2) as usize;
 	let data = resample_traffic(samples, point_capacity, value);
+	let plotted_data = plottable_rate_points(&data);
 	let peak = data.iter().map(|(_, rate)| *rate as u64).max().unwrap_or(1);
 	let ceiling = rate_axis_ceiling(peak);
 	let x_labels = vec![
 		Line::styled(
-			format!("-{}", axis_duration(history_seconds)),
+			format_axis_timestamp(start_time),
 			Style::default().fg(MUTED),
 		),
 		Line::styled(
-			format!("-{}", axis_duration(history_seconds / 2.0)),
+			format_axis_timestamp((start_time + end_time) / 2.0),
 			Style::default().fg(MUTED),
 		),
-		Line::styled("now", Style::default().fg(MUTED)),
+		Line::styled(format_axis_timestamp(end_time), Style::default().fg(MUTED)),
 	];
 	let y_labels = vec![
 		Line::styled("0 B/s", Style::default().fg(MUTED)),
@@ -1390,15 +1384,15 @@ fn draw_rate_chart(
 		.marker(Marker::HalfBlock)
 		.graph_type(GraphType::Bar)
 		.style(Style::default().fg(accent))
-		.data(&data);
+		.data(&plotted_data);
 	let chart = Chart::new(vec![dataset])
 		.style(Style::default().bg(SURFACE))
 		.block(panel(title, accent))
 		.x_axis(
 			Axis::default()
-				.title(Line::styled("time", Style::default().fg(MUTED)))
+				.title(Line::styled("time (UTC)", Style::default().fg(MUTED)))
 				.style(Style::default().fg(BORDER))
-				.bounds([-history_seconds, 0.0])
+				.bounds([start_time, end_time])
 				.labels(x_labels),
 		)
 		.y_axis(
@@ -1419,11 +1413,11 @@ fn resample_traffic(
 	if samples.is_empty() || capacity == 0 {
 		return Vec::new();
 	}
+	let timestamps = traffic_timestamps(samples);
 	let bucket_count = capacity.min(samples.len()).max(1);
-	let interval_seconds = samples
-		.back()
-		.map_or(1.0, |sample| sample.interval_ms.max(1) as f64 / 1_000.0);
-	let history_seconds = samples.len().saturating_sub(1) as f64 * interval_seconds;
+	let start_time = timestamps.first().copied().unwrap_or_default();
+	let end_time = timestamps.last().copied().unwrap_or(start_time);
+	let history_seconds = (end_time - start_time).max(0.0);
 	(0..bucket_count)
 		.map(|bucket| {
 			let start = bucket * samples.len() / bucket_count;
@@ -1436,26 +1430,82 @@ fn resample_traffic(
 				.max()
 				.unwrap_or(0);
 			let x = if bucket_count == 1 {
-				0.0
+				end_time
 			} else {
-				-history_seconds + history_seconds * bucket as f64 / (bucket_count - 1) as f64
+				start_time + history_seconds * bucket as f64 / (bucket_count - 1) as f64
 			};
 			(x, peak as f64)
 		})
 		.collect()
 }
 
+fn plottable_rate_points(data: &[(f64, f64)]) -> Vec<(f64, f64)> {
+	data.iter()
+		.copied()
+		.filter(|(_, rate)| *rate > 0.0)
+		.collect()
+}
+
+fn traffic_timestamps(samples: &VecDeque<TrafficSample>) -> Vec<f64> {
+	if samples.is_empty() {
+		return Vec::new();
+	}
+	let interval_seconds = samples
+		.back()
+		.map_or(1.0, |sample| sample.interval_ms.max(1) as f64 / 1_000.0);
+	let anchor = samples
+		.iter()
+		.enumerate()
+		.rev()
+		.find_map(|(index, sample)| sample.time.as_ref().map(|time| (index, proto_time(time))))
+		.unwrap_or_else(|| (samples.len() - 1, unix_now_seconds()));
+	samples
+		.iter()
+		.enumerate()
+		.map(|(index, sample)| {
+			sample.time.as_ref().map_or_else(
+				|| anchor.1 + (index as f64 - anchor.0 as f64) * interval_seconds,
+				proto_time,
+			)
+		})
+		.collect()
+}
+
+fn traffic_time_bounds(samples: &VecDeque<TrafficSample>) -> [f64; 2] {
+	let timestamps = traffic_timestamps(samples);
+	let end = timestamps.last().copied().unwrap_or_else(unix_now_seconds);
+	let start = timestamps.first().copied().unwrap_or(end - 1.0);
+	if end > start {
+		[start, end]
+	} else {
+		[start - 1.0, end]
+	}
+}
+
+fn proto_time(timestamp: &prost_types::Timestamp) -> f64 {
+	timestamp.seconds as f64 + timestamp.nanos as f64 / 1_000_000_000.0
+}
+
+fn unix_now_seconds() -> f64 {
+	SystemTime::now()
+		.duration_since(UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_secs_f64()
+}
+
 fn rate_axis_ceiling(value: u64) -> u64 {
 	value.max(1).checked_next_power_of_two().unwrap_or(u64::MAX)
 }
 
-fn axis_duration(seconds: f64) -> String {
-	let seconds = seconds.max(0.0).round() as u64;
-	if seconds >= 60 {
-		format!("{}m{:02}s", seconds / 60, seconds % 60)
-	} else {
-		format!("{seconds}s")
-	}
+fn format_axis_timestamp(timestamp: f64) -> String {
+	let seconds = timestamp.floor() as i64;
+	let day_seconds = seconds.rem_euclid(86_400);
+	format!(
+		"{:02}:{:02}:{:02}",
+		day_seconds / 3_600,
+		day_seconds / 60 % 60,
+		day_seconds % 60
+	)
 }
 
 fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -2180,6 +2230,10 @@ mod tests {
 	fn traffic_history_resamples_to_available_width() {
 		let samples: VecDeque<_> = (0..120)
 			.map(|index| TrafficSample {
+				time: Some(prost_types::Timestamp {
+					seconds: 1_700_000_000 + index as i64,
+					nanos: 0,
+				}),
 				interval_ms: 1_000,
 				bytes_in_per_second: index,
 				..TrafficSample::default()
@@ -2187,12 +2241,12 @@ mod tests {
 			.collect();
 		let narrow = resample_traffic(&samples, 10, |sample| sample.bytes_in_per_second);
 		assert_eq!(narrow.len(), 10);
-		assert_eq!(narrow.first(), Some(&(-119.0, 11.0)));
-		assert_eq!(narrow.last(), Some(&(0.0, 119.0)));
+		assert_eq!(narrow.first(), Some(&(1_700_000_000.0, 11.0)));
+		assert_eq!(narrow.last(), Some(&(1_700_000_119.0, 119.0)));
 		let wide = resample_traffic(&samples, 200, |sample| sample.bytes_in_per_second);
 		assert_eq!(wide.len(), 120);
-		assert_eq!(wide.first(), Some(&(-119.0, 0.0)));
-		assert_eq!(wide.last(), Some(&(0.0, 119.0)));
+		assert_eq!(wide.first(), Some(&(1_700_000_000.0, 0.0)));
+		assert_eq!(wide.last(), Some(&(1_700_000_119.0, 119.0)));
 	}
 
 	#[test]
@@ -2201,6 +2255,10 @@ mod tests {
 		app.page = Page::Traffic;
 		for index in 1..120 {
 			app.traffic.push_back(TrafficSample {
+				time: Some(prost_types::Timestamp {
+					seconds: 1_700_000_000 + index as i64,
+					nanos: 0,
+				}),
 				interval_ms: 1_000,
 				bytes_in_per_second: index * 1_024,
 				bytes_out_per_second: index * 512,
@@ -2208,10 +2266,29 @@ mod tests {
 			});
 		}
 		let rendered = render_text(&mut app, 80, 24);
-		assert!(rendered.contains("now"));
+		assert!(rendered.contains("22:13:20"));
+		assert!(rendered.contains("22:15:19"));
 		assert!(rendered.contains("0 B/s"));
-		assert!(rendered.contains("1m59s"));
+		assert_eq!(format_axis_timestamp(1_700_000_000.0), "22:13:20");
 		assert_eq!(rate_axis_ceiling(9_000), 16_384);
+	}
+
+	#[test]
+	fn zero_traffic_does_not_produce_chart_bars() {
+		let samples: VecDeque<_> = (0..20)
+			.map(|index| TrafficSample {
+				time: Some(prost_types::Timestamp {
+					seconds: 1_700_000_000 + index,
+					nanos: 0,
+				}),
+				interval_ms: 1_000,
+				bytes_in_per_second: 0,
+				..TrafficSample::default()
+			})
+			.collect();
+		let data = resample_traffic(&samples, 10, |sample| sample.bytes_in_per_second);
+		assert!(data.iter().all(|(_, rate)| *rate == 0.0));
+		assert!(plottable_rate_points(&data).is_empty());
 	}
 
 	fn populated_app() -> App {
@@ -2251,6 +2328,11 @@ mod tests {
 		};
 		app.connections.insert(connection.id.clone(), connection);
 		app.traffic.push_back(TrafficSample {
+			time: Some(prost_types::Timestamp {
+				seconds: 1_700_000_000,
+				nanos: 0,
+			}),
+			interval_ms: 1_000,
 			bytes_in_per_second: 12_000,
 			bytes_out_per_second: 8_000,
 			active_connections: 3,
@@ -2258,7 +2340,6 @@ mod tests {
 			process_bytes_out: 2_097_152,
 			all_time_bytes_in: 10_485_760,
 			all_time_bytes_out: 20_971_520,
-			..TrafficSample::default()
 		});
 		app.logs.push_back(LogEntry {
 			level: "INFO".to_string(),
