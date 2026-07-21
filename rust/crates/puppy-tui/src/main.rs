@@ -21,10 +21,11 @@ use puppy_rpc::v1::{
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::symbols::Marker;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-	Block, BorderType, Borders, Cell, Clear, List, ListItem, Padding, Paragraph, Row, Sparkline,
-	Table, Tabs, Wrap,
+	Axis, Block, BorderType, Borders, Cell, Chart, Clear, Dataset, GraphType, List, ListItem,
+	Padding, Paragraph, Row, Table, Tabs, Wrap,
 };
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
@@ -1244,30 +1245,16 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	let rows = Layout::default()
 		.direction(Direction::Vertical)
 		.constraints([
-			Constraint::Length(5),
+			Constraint::Length(4),
 			Constraint::Length(1),
-			Constraint::Min(6),
+			Constraint::Min(8),
 			Constraint::Length(1),
-			Constraint::Length(5),
+			Constraint::Length(4),
 		])
 		.split(area);
 	let latest = app.traffic.back();
 	let inbound = latest.map_or(0, |v| v.bytes_in_per_second);
 	let outbound = latest.map_or(0, |v| v.bytes_out_per_second);
-	let max_inbound = app
-		.traffic
-		.iter()
-		.map(|v| v.bytes_in_per_second)
-		.max()
-		.unwrap_or(1)
-		.max(1);
-	let max_outbound = app
-		.traffic
-		.iter()
-		.map(|v| v.bytes_out_per_second)
-		.max()
-		.unwrap_or(1)
-		.max(1);
 	let summary = Layout::default()
 		.direction(Direction::Horizontal)
 		.constraints([
@@ -1302,8 +1289,6 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		latest.map_or(0, |v| v.active_connections).to_string(),
 		"Open connections".to_string(),
 	);
-	let in_data: Vec<u64> = app.traffic.iter().map(|v| v.bytes_in_per_second).collect();
-	let out_data: Vec<u64> = app.traffic.iter().map(|v| v.bytes_out_per_second).collect();
 	let charts = Layout::default()
 		.direction(Direction::Horizontal)
 		.constraints([
@@ -1312,21 +1297,21 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 			Constraint::Percentage(50),
 		])
 		.split(rows[2]);
-	frame.render_widget(
-		Sparkline::default()
-			.block(panel("INBOUND · LAST 120 SECONDS", CYAN))
-			.data(&in_data)
-			.max(max_inbound)
-			.style(Style::default().fg(CYAN).bg(SURFACE)),
+	draw_rate_chart(
+		frame,
 		charts[0],
+		"INBOUND RATE HISTORY",
+		CYAN,
+		&app.traffic,
+		|sample| sample.bytes_in_per_second,
 	);
-	frame.render_widget(
-		Sparkline::default()
-			.block(panel("OUTBOUND · LAST 120 SECONDS", MAGENTA))
-			.data(&out_data)
-			.max(max_outbound)
-			.style(Style::default().fg(MAGENTA).bg(SURFACE)),
+	draw_rate_chart(
+		frame,
 		charts[2],
+		"OUTBOUND RATE HISTORY",
+		MAGENTA,
+		&app.traffic,
+		|sample| sample.bytes_out_per_second,
 	);
 	let totals = Layout::default()
 		.direction(Direction::Horizontal)
@@ -1360,6 +1345,117 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		),
 		"Inbound / Outbound".to_string(),
 	);
+}
+
+fn draw_rate_chart(
+	frame: &mut Frame<'_>,
+	area: Rect,
+	title: &str,
+	accent: Color,
+	samples: &VecDeque<TrafficSample>,
+	value: fn(&TrafficSample) -> u64,
+) {
+	let interval_seconds = samples
+		.back()
+		.map_or(1.0, |sample| sample.interval_ms.max(1) as f64 / 1_000.0);
+	let history_seconds = if samples.len() > 1 {
+		(samples.len() - 1) as f64 * interval_seconds
+	} else {
+		interval_seconds
+	};
+	let point_capacity = area.width.saturating_sub(14).max(2) as usize;
+	let data = resample_traffic(samples, point_capacity, value);
+	let peak = data.iter().map(|(_, rate)| *rate as u64).max().unwrap_or(1);
+	let ceiling = rate_axis_ceiling(peak);
+	let x_labels = vec![
+		Line::styled(
+			format!("-{}", axis_duration(history_seconds)),
+			Style::default().fg(MUTED),
+		),
+		Line::styled(
+			format!("-{}", axis_duration(history_seconds / 2.0)),
+			Style::default().fg(MUTED),
+		),
+		Line::styled("now", Style::default().fg(MUTED)),
+	];
+	let y_labels = vec![
+		Line::styled("0 B/s", Style::default().fg(MUTED)),
+		Line::styled(
+			format!("{}/s", bytes(ceiling / 2)),
+			Style::default().fg(MUTED),
+		),
+		Line::styled(format!("{}/s", bytes(ceiling)), Style::default().fg(MUTED)),
+	];
+	let dataset = Dataset::default()
+		.marker(Marker::HalfBlock)
+		.graph_type(GraphType::Bar)
+		.style(Style::default().fg(accent))
+		.data(&data);
+	let chart = Chart::new(vec![dataset])
+		.style(Style::default().bg(SURFACE))
+		.block(panel(title, accent))
+		.x_axis(
+			Axis::default()
+				.title(Line::styled("time", Style::default().fg(MUTED)))
+				.style(Style::default().fg(BORDER))
+				.bounds([-history_seconds, 0.0])
+				.labels(x_labels),
+		)
+		.y_axis(
+			Axis::default()
+				.title(Line::styled("rate", Style::default().fg(MUTED)))
+				.style(Style::default().fg(BORDER))
+				.bounds([0.0, ceiling as f64])
+				.labels(y_labels),
+		);
+	frame.render_widget(chart, area);
+}
+
+fn resample_traffic(
+	samples: &VecDeque<TrafficSample>,
+	capacity: usize,
+	value: fn(&TrafficSample) -> u64,
+) -> Vec<(f64, f64)> {
+	if samples.is_empty() || capacity == 0 {
+		return Vec::new();
+	}
+	let bucket_count = capacity.min(samples.len()).max(1);
+	let interval_seconds = samples
+		.back()
+		.map_or(1.0, |sample| sample.interval_ms.max(1) as f64 / 1_000.0);
+	let history_seconds = samples.len().saturating_sub(1) as f64 * interval_seconds;
+	(0..bucket_count)
+		.map(|bucket| {
+			let start = bucket * samples.len() / bucket_count;
+			let end = ((bucket + 1) * samples.len() / bucket_count).max(start + 1);
+			let peak = samples
+				.iter()
+				.skip(start)
+				.take(end.saturating_sub(start))
+				.map(value)
+				.max()
+				.unwrap_or(0);
+			let x = if bucket_count == 1 {
+				0.0
+			} else {
+				-history_seconds + history_seconds * bucket as f64 / (bucket_count - 1) as f64
+			};
+			(x, peak as f64)
+		})
+		.collect()
+}
+
+fn rate_axis_ceiling(value: u64) -> u64 {
+	value.max(1).checked_next_power_of_two().unwrap_or(u64::MAX)
+}
+
+fn axis_duration(seconds: f64) -> String {
+	let seconds = seconds.max(0.0).round() as u64;
+	if seconds >= 60 {
+		format!("{}m{:02}s", seconds / 60, seconds % 60)
+	} else {
+		format!("{seconds}s")
+	}
 }
 
 fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -2078,6 +2174,44 @@ mod tests {
 		let rendered = render_text(&mut app, 80, 24);
 		assert!(rendered.contains("TARGET GROUPS"));
 		assert!(rendered.contains("https://example.com:443"));
+	}
+
+	#[test]
+	fn traffic_history_resamples_to_available_width() {
+		let samples: VecDeque<_> = (0..120)
+			.map(|index| TrafficSample {
+				interval_ms: 1_000,
+				bytes_in_per_second: index,
+				..TrafficSample::default()
+			})
+			.collect();
+		let narrow = resample_traffic(&samples, 10, |sample| sample.bytes_in_per_second);
+		assert_eq!(narrow.len(), 10);
+		assert_eq!(narrow.first(), Some(&(-119.0, 11.0)));
+		assert_eq!(narrow.last(), Some(&(0.0, 119.0)));
+		let wide = resample_traffic(&samples, 200, |sample| sample.bytes_in_per_second);
+		assert_eq!(wide.len(), 120);
+		assert_eq!(wide.first(), Some(&(-119.0, 0.0)));
+		assert_eq!(wide.last(), Some(&(0.0, 119.0)));
+	}
+
+	#[test]
+	fn traffic_charts_render_time_and_rate_axes() {
+		let mut app = populated_app();
+		app.page = Page::Traffic;
+		for index in 1..120 {
+			app.traffic.push_back(TrafficSample {
+				interval_ms: 1_000,
+				bytes_in_per_second: index * 1_024,
+				bytes_out_per_second: index * 512,
+				..TrafficSample::default()
+			});
+		}
+		let rendered = render_text(&mut app, 80, 24);
+		assert!(rendered.contains("now"));
+		assert!(rendered.contains("0 B/s"));
+		assert!(rendered.contains("1m59s"));
+		assert_eq!(rate_axis_ceiling(9_000), 16_384);
 	}
 
 	fn populated_app() -> App {
