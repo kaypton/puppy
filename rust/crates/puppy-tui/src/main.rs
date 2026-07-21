@@ -19,16 +19,30 @@ use puppy_rpc::v1::{
 };
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-	Block, Borders, Cell, Clear, List, ListItem, Paragraph, Row, Sparkline, Table, Tabs, Wrap,
+	Block, BorderType, Borders, Cell, Clear, List, ListItem, Padding, Paragraph, Row, Sparkline,
+	Table, Tabs, Wrap,
 };
 use ratatui::{Frame, Terminal};
 use tokio::sync::mpsc;
 use tonic::metadata::MetadataValue;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint};
 use tonic::Request;
+
+const BACKGROUND: Color = Color::Rgb(7, 11, 19);
+const SURFACE: Color = Color::Rgb(13, 20, 32);
+const SURFACE_ALT: Color = Color::Rgb(20, 30, 47);
+const BORDER: Color = Color::Rgb(48, 65, 86);
+const TEXT: Color = Color::Rgb(224, 231, 239);
+const MUTED: Color = Color::Rgb(126, 143, 166);
+const CYAN: Color = Color::Rgb(70, 211, 220);
+const BLUE: Color = Color::Rgb(89, 142, 247);
+const GREEN: Color = Color::Rgb(89, 214, 124);
+const YELLOW: Color = Color::Rgb(244, 190, 76);
+const RED: Color = Color::Rgb(255, 105, 120);
+const MAGENTA: Color = Color::Rgb(194, 126, 242);
 
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -490,11 +504,16 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 
 fn draw(frame: &mut Frame<'_>, app: &App) {
 	let size = frame.area();
+	frame.render_widget(
+		Block::default().style(Style::default().bg(BACKGROUND)),
+		size,
+	);
 	if size.width < 80 || size.height < 24 {
 		frame.render_widget(
 			Paragraph::new("Terminal is too small; minimum size is 80x24")
 				.alignment(Alignment::Center)
-				.block(Block::default().borders(Borders::ALL)),
+				.style(Style::default().fg(RED).bg(SURFACE).bold())
+				.block(panel("RESIZE TERMINAL", RED)),
 			size,
 		);
 		return;
@@ -502,131 +521,298 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 	let layout = Layout::default()
 		.direction(Direction::Vertical)
 		.constraints([
-			Constraint::Length(3),
+			Constraint::Length(4),
 			Constraint::Min(1),
-			Constraint::Length(1),
+			Constraint::Length(2),
 		])
 		.split(size);
-	let titles = ["1 Overview", "2 Connections", "3 Traffic", "4 Logs"]
-		.into_iter()
-		.map(Line::from)
-		.collect::<Vec<_>>();
-	frame.render_widget(
-		Tabs::new(titles)
-			.select(app.page.index())
-			.highlight_style(
-				Style::default()
-					.fg(Color::Cyan)
-					.add_modifier(Modifier::BOLD),
-			)
-			.block(Block::default().title(" Puppy ").borders(Borders::ALL)),
-		layout[0],
-	);
+	draw_header(frame, layout[0], app);
+	let content = inset(layout[1], 1, 0);
 	match app.page {
-		Page::Overview => draw_overview(frame, layout[1], app),
-		Page::Connections => draw_connections(frame, layout[1], app),
-		Page::Traffic => draw_traffic(frame, layout[1], app),
-		Page::Logs => draw_logs(frame, layout[1], app),
+		Page::Overview => draw_overview(frame, content, app),
+		Page::Connections => draw_connections(frame, content, app),
+		Page::Traffic => draw_traffic(frame, content, app),
+		Page::Logs => draw_logs(frame, content, app),
 	}
-	let color = if app.connected {
-		Color::Green
-	} else {
-		Color::Yellow
-	};
-	frame.render_widget(
-		Paragraph::new(Line::from(vec![
-			Span::styled(&app.status, Style::default().fg(color)),
-			Span::raw("   ? Help   q Quit"),
-		])),
-		layout[2],
-	);
+	draw_footer(frame, layout[2], app);
 	if app.help {
-		draw_help(frame, centered(60, 60, size));
+		draw_help(frame, centered(72, 82, size));
 	}
 	if app.detail {
 		draw_detail(frame, centered(76, 76, size), app);
 	}
 }
 
+fn draw_header(frame: &mut Frame<'_>, area: Rect, app: &App) {
+	let block = Block::default()
+		.borders(Borders::BOTTOM)
+		.border_style(Style::default().fg(BORDER))
+		.style(Style::default().bg(SURFACE));
+	let inner = block.inner(area);
+	frame.render_widget(block, area);
+	let columns = Layout::default()
+		.direction(Direction::Horizontal)
+		.constraints([
+			Constraint::Length(19),
+			Constraint::Min(44),
+			Constraint::Length(14),
+		])
+		.split(inner);
+	frame.render_widget(
+		Paragraph::new(vec![
+			Line::from(vec![
+				Span::styled(" PUPPY", Style::default().fg(CYAN).bold()),
+				Span::styled(" /", Style::default().fg(BORDER)),
+			]),
+			Line::styled(
+				" NETWORK OBSERVER",
+				Style::default().fg(MUTED).add_modifier(Modifier::BOLD),
+			),
+		])
+		.style(Style::default().bg(SURFACE)),
+		columns[0],
+	);
+	let tabs_area = centered_row(columns[1]);
+	let titles = [
+		("1", "Overview"),
+		("2", "Connections"),
+		("3", "Traffic"),
+		("4", "Logs"),
+	]
+	.into_iter()
+	.map(|(key, label)| {
+		Line::from(vec![
+			Span::styled(format!(" {key} "), Style::default().fg(MUTED)),
+			Span::styled(format!("{label} "), Style::default().fg(TEXT)),
+		])
+	})
+	.collect::<Vec<_>>();
+	frame.render_widget(
+		Tabs::new(titles)
+			.select(app.page.index())
+			.highlight_style(
+				Style::default()
+					.fg(BACKGROUND)
+					.bg(CYAN)
+					.add_modifier(Modifier::BOLD),
+			)
+			.style(Style::default().bg(SURFACE))
+			.divider(Span::raw(" ")),
+		tabs_area,
+	);
+	let (indicator, label, color) = if app.connected {
+		("●", "LIVE", GREEN)
+	} else {
+		("◌", "RETRYING", YELLOW)
+	};
+	frame.render_widget(
+		Paragraph::new(vec![
+			Line::from(vec![
+				Span::styled(format!("{indicator} "), Style::default().fg(color).bold()),
+				Span::styled(label, Style::default().fg(color).bold()),
+			]),
+			Line::styled("gRPC", Style::default().fg(MUTED)),
+		])
+		.alignment(Alignment::Right)
+		.style(Style::default().bg(SURFACE)),
+		columns[2],
+	);
+}
+
+fn draw_footer(frame: &mut Frame<'_>, area: Rect, app: &App) {
+	let block = Block::default()
+		.borders(Borders::TOP)
+		.border_style(Style::default().fg(BORDER))
+		.style(Style::default().bg(SURFACE));
+	let inner = block.inner(area);
+	frame.render_widget(block, area);
+	let columns = Layout::default()
+		.direction(Direction::Horizontal)
+		.constraints([Constraint::Min(20), Constraint::Length(58)])
+		.split(inner);
+	let status_color = if app.connected { MUTED } else { YELLOW };
+	frame.render_widget(
+		Paragraph::new(Line::from(vec![
+			Span::raw(" "),
+			Span::styled(&app.status, Style::default().fg(status_color)),
+		]))
+		.style(Style::default().bg(SURFACE)),
+		columns[0],
+	);
+	let mut hints = vec![];
+	match app.page {
+		Page::Connections => {
+			hints.extend(key_hint("/", "Search"));
+			hints.extend(key_hint("f", "Filter"));
+			hints.extend(key_hint("↵", "Details"));
+		}
+		Page::Logs => {
+			hints.extend(key_hint("/", "Search"));
+			hints.extend(key_hint("l", "Level"));
+			hints.extend(key_hint("space", "Follow"));
+		}
+		_ => hints.extend(key_hint("1–4", "Navigate")),
+	}
+	hints.extend(key_hint("?", "Help"));
+	hints.extend(key_hint("q", "Quit"));
+	frame.render_widget(
+		Paragraph::new(Line::from(hints))
+			.alignment(Alignment::Right)
+			.style(Style::default().bg(SURFACE)),
+		columns[1],
+	);
+}
+
 fn draw_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	let Some(value) = &app.overview else {
 		frame.render_widget(
 			Paragraph::new("Waiting for server overview...")
-				.block(Block::default().borders(Borders::ALL)),
+				.alignment(Alignment::Center)
+				.style(Style::default().fg(MUTED).bg(SURFACE))
+				.block(panel("OVERVIEW", CYAN)),
 			area,
 		);
 		return;
 	};
 	let rows = Layout::default()
 		.direction(Direction::Vertical)
-		.constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+		.constraints([
+			Constraint::Length(5),
+			Constraint::Length(1),
+			Constraint::Min(10),
+		])
 		.split(area);
+	let server_color = if value.degraded { YELLOW } else { GREEN };
+	let server_status = if value.degraded {
+		format!("DEGRADED · {}", value.degraded_reason)
+	} else {
+		"HEALTHY".to_string()
+	};
+	frame.render_widget(
+		Paragraph::new(vec![
+			Line::from(vec![
+				Span::styled(" ● ", Style::default().fg(server_color).bold()),
+				Span::styled(server_status, Style::default().fg(server_color).bold()),
+				Span::styled("   Puppy server ", Style::default().fg(TEXT)),
+				Span::styled(
+					format!("v{}", value.server_version),
+					Style::default().fg(CYAN).bold(),
+				),
+				Span::styled(
+					format!("  ·  API {}", value.api_version),
+					Style::default().fg(MUTED),
+				),
+			]),
+			Line::from(vec![
+				Span::styled(" Instance ", Style::default().fg(MUTED)),
+				Span::styled(short(&value.server_instance_id), Style::default().fg(TEXT)),
+				Span::styled("   PID ", Style::default().fg(MUTED)),
+				Span::styled(value.pid.to_string(), Style::default().fg(TEXT)),
+				Span::styled("   Uptime ", Style::default().fg(MUTED)),
+				Span::styled(
+					format_duration(value.uptime_seconds as u64),
+					Style::default().fg(TEXT),
+				),
+			]),
+		])
+		.style(Style::default().fg(TEXT).bg(SURFACE))
+		.block(panel("SERVER STATUS", server_color)),
+		rows[0],
+	);
+	let card_rows = Layout::default()
+		.direction(Direction::Vertical)
+		.constraints([
+			Constraint::Percentage(50),
+			Constraint::Length(1),
+			Constraint::Percentage(50),
+		])
+		.split(rows[2]);
 	let top = Layout::default()
 		.direction(Direction::Horizontal)
-		.constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-		.split(rows[0]);
+		.constraints([
+			Constraint::Percentage(50),
+			Constraint::Length(1),
+			Constraint::Percentage(50),
+		])
+		.split(card_rows[0]);
 	let bottom = Layout::default()
 		.direction(Direction::Horizontal)
-		.constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-		.split(rows[1]);
-	let status = if value.degraded {
-		format!("Degraded: {}", value.degraded_reason)
-	} else {
-		"Healthy".to_string()
-	};
-	metric(
+		.constraints([
+			Constraint::Percentage(50),
+			Constraint::Length(1),
+			Constraint::Percentage(50),
+		])
+		.split(card_rows[2]);
+	metric_card(
 		frame,
 		top[0],
-		"Server",
+		"ACTIVE CONNECTIONS",
+		CYAN,
+		value.active_connections.to_string(),
 		format!(
-			"Status: {status}\nVersion: {} / API {}\nInstance: {}\nPID: {}\nUptime: {}",
-			value.server_version,
-			value.api_version,
-			short(&value.server_instance_id),
-			value.pid,
-			format_duration(value.uptime_seconds as u64)
+			"{} this run  ·  {} all time",
+			value.process_total_connections, value.all_time_connections
 		),
 	);
-	metric(
+	let dial_total = value.dial_successes.saturating_add(value.dial_failures);
+	let dial_rate = if dial_total == 0 {
+		100.0
+	} else {
+		value.dial_successes as f64 * 100.0 / dial_total as f64
+	};
+	metric_card(
 		frame,
-		top[1],
-		"Connections",
+		top[2],
+		"DIAL HEALTH",
+		GREEN,
+		format!("{dial_rate:.1}%"),
 		format!(
-			"Active: {}\nProcess total: {}\nAll-time total: {}\nDial success/failure: {}/{}",
-			value.active_connections,
-			value.process_total_connections,
-			value.all_time_connections,
-			value.dial_successes,
-			value.dial_failures
+			"{} succeeded  ·  {} failed",
+			value.dial_successes, value.dial_failures
 		),
 	);
-	metric(
+	metric_card(
 		frame,
 		bottom[0],
-		"Process traffic",
+		"SESSION TRAFFIC",
+		BLUE,
 		format!(
-			"Inbound: {}\nOutbound: {}",
+			"↓ {}   ↑ {}",
 			bytes(value.process_bytes_in),
 			bytes(value.process_bytes_out)
 		),
+		"Inbound / Outbound".to_string(),
 	);
-	metric(
+	metric_card(
 		frame,
-		bottom[1],
-		"All-time traffic",
+		bottom[2],
+		"ALL-TIME TRAFFIC",
+		MAGENTA,
 		format!(
-			"Inbound: {}\nOutbound: {}",
+			"↓ {}   ↑ {}",
 			bytes(value.all_time_bytes_in),
 			bytes(value.all_time_bytes_out)
 		),
+		"Inbound / Outbound".to_string(),
 	);
 }
 
-fn metric(frame: &mut Frame<'_>, area: Rect, title: &str, text: String) {
+fn metric_card(
+	frame: &mut Frame<'_>,
+	area: Rect,
+	title: &str,
+	accent: Color,
+	primary: String,
+	secondary: String,
+) {
 	frame.render_widget(
-		Paragraph::new(text)
-			.block(Block::default().title(title).borders(Borders::ALL))
-			.wrap(Wrap { trim: true }),
+		Paragraph::new(vec![
+			Line::styled(primary, Style::default().fg(accent).bold()),
+			Line::styled(secondary, Style::default().fg(MUTED)),
+		])
+		.style(Style::default().bg(SURFACE))
+		.block(panel(title, accent))
+		.wrap(Wrap { trim: true }),
 		area,
 	);
 }
@@ -639,52 +825,120 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		x if x == ConnectionStatus::Closed as i32 => "Closed",
 		_ => "All",
 	};
-	let title = if app.searching {
-		format!(" Connections  Search: {}_ ", app.query)
+	let layout = Layout::default()
+		.direction(Direction::Vertical)
+		.constraints([
+			Constraint::Length(3),
+			Constraint::Length(1),
+			Constraint::Min(1),
+		])
+		.split(area);
+	let search = if app.searching {
+		format!("{}▌", app.query)
+	} else if app.query.is_empty() {
+		"Press / to search".to_string()
 	} else {
-		format!(
-			" Connections {}  Filter:{filter}  / Search  f Filter  s Sort  Enter Details ",
-			values.len()
+		app.query.clone()
+	};
+	let toolbar_color = if app.searching { YELLOW } else { BORDER };
+	frame.render_widget(
+		Paragraph::new(Line::from(vec![
+			Span::styled(" SEARCH ", Style::default().fg(MUTED).bold()),
+			Span::styled(search, Style::default().fg(TEXT)),
+			Span::styled("    FILTER ", Style::default().fg(MUTED).bold()),
+			Span::styled(format!(" {filter} "), chip_style(CYAN)),
+			Span::styled("    SORT ", Style::default().fg(MUTED).bold()),
+			Span::styled(
+				if app.descending {
+					" Newest "
+				} else {
+					" Oldest "
+				},
+				chip_style(BLUE),
+			),
+		]))
+		.style(Style::default().bg(SURFACE))
+		.block(panel("CONNECTION EXPLORER", toolbar_color)),
+		layout[0],
+	);
+	let compact = layout[2].width < 110;
+	let rows = values.iter().enumerate().map(|(index, value)| {
+		let cells = if compact {
+			vec![
+				Cell::from(if index == selected { "▌" } else { "" })
+					.style(Style::default().fg(CYAN)),
+				Cell::from(status_name(value.status)).style(connection_status_style(value.status)),
+				Cell::from(value.remote_addr.clone()),
+				Cell::from(format!("{}:{}", value.target_host, value.target_port)),
+				Cell::from(bytes(value.bytes_in)).style(Style::default().fg(CYAN)),
+				Cell::from(bytes(value.bytes_out)).style(Style::default().fg(MAGENTA)),
+			]
+		} else {
+			vec![
+				Cell::from(if index == selected { "▌" } else { "" })
+					.style(Style::default().fg(CYAN)),
+				Cell::from(short(&value.id)),
+				Cell::from(status_name(value.status)).style(connection_status_style(value.status)),
+				Cell::from(value.frontend.clone()),
+				Cell::from(value.remote_addr.clone()),
+				Cell::from(format!("{}:{}", value.target_host, value.target_port)),
+				Cell::from(value.protocol.clone()).style(Style::default().fg(BLUE)),
+				Cell::from(bytes(value.bytes_in)).style(Style::default().fg(CYAN)),
+				Cell::from(bytes(value.bytes_out)).style(Style::default().fg(MAGENTA)),
+			]
+		};
+		let row = Row::new(cells);
+		if index == selected {
+			row.style(Style::default().fg(TEXT).bg(SURFACE_ALT).bold())
+		} else if index % 2 == 1 {
+			row.style(Style::default().fg(TEXT).bg(SURFACE))
+		} else {
+			row.style(Style::default().fg(TEXT).bg(BACKGROUND))
+		}
+	});
+	let (widths, labels) = if compact {
+		(
+			vec![
+				Constraint::Length(1),
+				Constraint::Length(8),
+				Constraint::Length(18),
+				Constraint::Min(18),
+				Constraint::Length(9),
+				Constraint::Length(9),
+			],
+			vec!["", "Status", "Client", "Target", "Inbound", "Outbound"],
+		)
+	} else {
+		(
+			vec![
+				Constraint::Length(1),
+				Constraint::Length(14),
+				Constraint::Length(8),
+				Constraint::Length(14),
+				Constraint::Length(22),
+				Constraint::Min(22),
+				Constraint::Length(8),
+				Constraint::Length(10),
+				Constraint::Length(10),
+			],
+			vec![
+				"", "ID", "Status", "Frontend", "Client", "Target", "Protocol", "Inbound",
+				"Outbound",
+			],
 		)
 	};
-	let rows = values.iter().enumerate().map(|(index, value)| {
-		Row::new(vec![
-			Cell::from(if index == selected { ">" } else { "" }),
-			Cell::from(short(&value.id)),
-			Cell::from(status_name(value.status)),
-			Cell::from(value.frontend.clone()),
-			Cell::from(value.remote_addr.clone()),
-			Cell::from(format!("{}:{}", value.target_host, value.target_port)),
-			Cell::from(value.protocol.clone()),
-			Cell::from(bytes(value.bytes_in)),
-			Cell::from(bytes(value.bytes_out)),
-		])
-	});
-	let widths = [
-		Constraint::Length(1),
-		Constraint::Length(14),
-		Constraint::Length(8),
-		Constraint::Length(14),
-		Constraint::Length(22),
-		Constraint::Min(22),
-		Constraint::Length(8),
-		Constraint::Length(10),
-		Constraint::Length(10),
-	];
-	let header = Row::new([
-		"", "ID", "Status", "Frontend", "Client", "Target", "Protocol", "Inbound", "Outbound",
-	])
-	.style(
+	let header = Row::new(labels).style(
 		Style::default()
-			.fg(Color::Cyan)
+			.fg(MUTED)
+			.bg(SURFACE_ALT)
 			.add_modifier(Modifier::BOLD),
 	);
 	frame.render_widget(
 		Table::new(rows, widths)
 			.header(header)
-			.row_highlight_style(Style::default().bg(Color::DarkGray))
-			.block(Block::default().title(title).borders(Borders::ALL)),
-		area,
+			.column_spacing(1)
+			.block(panel(&format!("CONNECTIONS  {}", values.len()), CYAN)),
+		layout[2],
 	);
 }
 
@@ -693,65 +947,134 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		.direction(Direction::Vertical)
 		.constraints([
 			Constraint::Length(5),
-			Constraint::Percentage(50),
-			Constraint::Percentage(50),
+			Constraint::Length(1),
+			Constraint::Min(6),
+			Constraint::Length(1),
+			Constraint::Length(5),
 		])
 		.split(area);
 	let latest = app.traffic.back();
 	let inbound = latest.map_or(0, |v| v.bytes_in_per_second);
 	let outbound = latest.map_or(0, |v| v.bytes_out_per_second);
-	let max = app
+	let max_inbound = app
 		.traffic
 		.iter()
-		.flat_map(|v| [v.bytes_in_per_second, v.bytes_out_per_second])
+		.map(|v| v.bytes_in_per_second)
 		.max()
 		.unwrap_or(1)
 		.max(1);
-	frame.render_widget(
-		Paragraph::new(format!(
-			"Current inbound {}/s    Current outbound {}/s    Active connections {}\nProcess total ↓{} ↑{}    All-time total ↓{} ↑{}",
-			bytes(inbound),
-			bytes(outbound),
-			latest.map_or(0, |v| v.active_connections),
-			bytes(latest.map_or(0, |v| v.process_bytes_in)),
-			bytes(latest.map_or(0, |v| v.process_bytes_out)),
-			bytes(latest.map_or(0, |v| v.all_time_bytes_in)),
-			bytes(latest.map_or(0, |v| v.all_time_bytes_out))
-		))
-		.block(Block::default().title(" Traffic ").borders(Borders::ALL)),
-		rows[0],
+	let max_outbound = app
+		.traffic
+		.iter()
+		.map(|v| v.bytes_out_per_second)
+		.max()
+		.unwrap_or(1)
+		.max(1);
+	let summary = Layout::default()
+		.direction(Direction::Horizontal)
+		.constraints([
+			Constraint::Percentage(33),
+			Constraint::Length(1),
+			Constraint::Percentage(34),
+			Constraint::Length(1),
+			Constraint::Percentage(33),
+		])
+		.split(rows[0]);
+	metric_card(
+		frame,
+		summary[0],
+		"INBOUND RATE",
+		CYAN,
+		format!("{}/s", bytes(inbound)),
+		"Live throughput".to_string(),
+	);
+	metric_card(
+		frame,
+		summary[2],
+		"OUTBOUND RATE",
+		MAGENTA,
+		format!("{}/s", bytes(outbound)),
+		"Live throughput".to_string(),
+	);
+	metric_card(
+		frame,
+		summary[4],
+		"ACTIVE FLOWS",
+		GREEN,
+		latest.map_or(0, |v| v.active_connections).to_string(),
+		"Open connections".to_string(),
 	);
 	let in_data: Vec<u64> = app.traffic.iter().map(|v| v.bytes_in_per_second).collect();
 	let out_data: Vec<u64> = app.traffic.iter().map(|v| v.bytes_out_per_second).collect();
+	let charts = Layout::default()
+		.direction(Direction::Horizontal)
+		.constraints([
+			Constraint::Percentage(50),
+			Constraint::Length(1),
+			Constraint::Percentage(50),
+		])
+		.split(rows[2]);
 	frame.render_widget(
 		Sparkline::default()
-			.block(
-				Block::default()
-					.title(" Inbound rate (last 120 seconds) ")
-					.borders(Borders::ALL),
-			)
+			.block(panel("INBOUND · LAST 120 SECONDS", CYAN))
 			.data(&in_data)
-			.max(max)
-			.style(Style::default().fg(Color::Cyan)),
-		rows[1],
+			.max(max_inbound)
+			.style(Style::default().fg(CYAN).bg(SURFACE)),
+		charts[0],
 	);
 	frame.render_widget(
 		Sparkline::default()
-			.block(
-				Block::default()
-					.title(" Outbound rate (last 120 seconds) ")
-					.borders(Borders::ALL),
-			)
+			.block(panel("OUTBOUND · LAST 120 SECONDS", MAGENTA))
 			.data(&out_data)
-			.max(max)
-			.style(Style::default().fg(Color::Magenta)),
-		rows[2],
+			.max(max_outbound)
+			.style(Style::default().fg(MAGENTA).bg(SURFACE)),
+		charts[2],
+	);
+	let totals = Layout::default()
+		.direction(Direction::Horizontal)
+		.constraints([
+			Constraint::Percentage(50),
+			Constraint::Length(1),
+			Constraint::Percentage(50),
+		])
+		.split(rows[4]);
+	metric_card(
+		frame,
+		totals[0],
+		"SESSION TOTAL",
+		BLUE,
+		format!(
+			"↓ {}   ↑ {}",
+			bytes(latest.map_or(0, |v| v.process_bytes_in)),
+			bytes(latest.map_or(0, |v| v.process_bytes_out))
+		),
+		"Inbound / Outbound".to_string(),
+	);
+	metric_card(
+		frame,
+		totals[2],
+		"ALL-TIME TOTAL",
+		YELLOW,
+		format!(
+			"↓ {}   ↑ {}",
+			bytes(latest.map_or(0, |v| v.all_time_bytes_in)),
+			bytes(latest.map_or(0, |v| v.all_time_bytes_out))
+		),
+		"Inbound / Outbound".to_string(),
 	);
 }
 
 fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	let visible = app.visible_logs();
-	let height = area.height.saturating_sub(2) as usize;
+	let layout = Layout::default()
+		.direction(Direction::Vertical)
+		.constraints([
+			Constraint::Length(3),
+			Constraint::Length(1),
+			Constraint::Min(1),
+		])
+		.split(area);
+	let height = layout[2].height.saturating_sub(2) as usize;
 	let start = if app.follow_logs {
 		visible.len().saturating_sub(height)
 	} else {
@@ -759,44 +1082,87 @@ fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 			.min(visible.len())
 			.saturating_sub(height.saturating_sub(1))
 	};
-	let items = visible.into_iter().skip(start).take(height).map(|entry| {
-		let color = match entry.level.as_str() {
-			"ERROR" => Color::Red,
-			"WARN" => Color::Yellow,
-			"DEBUG" | "TRACE" => Color::DarkGray,
-			_ => Color::Green,
-		};
-		ListItem::new(Line::from(vec![
-			Span::styled(format!("{:5}", entry.level), Style::default().fg(color)),
-			Span::raw(format!(" {:20} {}", short(&entry.target), entry.message)),
-		]))
-	});
+	let displayed_count = visible.len();
+	let items = visible
+		.into_iter()
+		.skip(start)
+		.take(height)
+		.enumerate()
+		.map(|(index, entry)| {
+			let color = log_level_color(&entry.level);
+			ListItem::new(Line::from(vec![
+				Span::styled(format!(" {:5} ", entry.level), chip_style(color)),
+				Span::styled(
+					format!(" {:18} ", short(&entry.target)),
+					Style::default().fg(MUTED),
+				),
+				Span::styled(entry.message.as_str(), Style::default().fg(TEXT)),
+			]))
+			.style(if index % 2 == 1 {
+				Style::default().bg(SURFACE)
+			} else {
+				Style::default().bg(BACKGROUND)
+			})
+		});
 	let mode = if app.follow_logs {
 		"Following"
 	} else {
 		"Paused"
 	};
-	let title = if app.searching {
-		format!(" Logs  Search: {}_ ", app.log_query)
+	let search = if app.searching {
+		format!("{}▌", app.log_query)
+	} else if app.log_query.is_empty() {
+		"Press / to search".to_string()
 	} else {
-		format!(
-			" Logs {mode}  Minimum level:{}  / Search  l Level  Space Pause/Resume ",
-			app.min_log_level
-		)
+		app.log_query.clone()
 	};
+	let toolbar_color = if app.searching { YELLOW } else { BORDER };
 	frame.render_widget(
-		List::new(items).block(Block::default().title(title).borders(Borders::ALL)),
-		area,
+		Paragraph::new(Line::from(vec![
+			Span::styled(" SEARCH ", Style::default().fg(MUTED).bold()),
+			Span::styled(search, Style::default().fg(TEXT)),
+			Span::styled("    LEVEL ", Style::default().fg(MUTED).bold()),
+			Span::styled(
+				format!(" {} ", app.min_log_level),
+				chip_style(log_level_color(&app.min_log_level)),
+			),
+			Span::styled("    MODE ", Style::default().fg(MUTED).bold()),
+			Span::styled(
+				format!(" {mode} "),
+				chip_style(if app.follow_logs { GREEN } else { YELLOW }),
+			),
+		]))
+		.style(Style::default().bg(SURFACE))
+		.block(panel("LOG STREAM", toolbar_color)),
+		layout[0],
+	);
+	frame.render_widget(
+		List::new(items)
+			.style(Style::default().bg(BACKGROUND))
+			.block(panel(&format!("EVENTS  {displayed_count}"), BLUE)),
+		layout[2],
 	);
 }
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 	frame.render_widget(Clear, area);
 	frame.render_widget(
-		Paragraph::new(
-			"1–4 Switch pages\nj/k or arrow keys Move\n/ Search connections or logs\nf Filter connection status   s Sort connections\nl Set minimum log level   Enter View details\nSpace Pause/resume log following\nEsc Close dialog   q Quit",
-		)
-		.block(Block::default().title(" Help ").borders(Borders::ALL))
+		Paragraph::new(vec![
+			help_line("1–4", "Switch dashboard pages"),
+			help_line("j / k", "Move through connections and logs"),
+			help_line("↑ / ↓", "Move through connections and logs"),
+			help_line("PgUp / PgDn", "Move ten rows at a time"),
+			help_line("/", "Search connections or logs"),
+			help_line("f", "Cycle the connection status filter"),
+			help_line("s", "Reverse the connection sort order"),
+			help_line("l", "Cycle the minimum log level"),
+			help_line("Space", "Pause or resume log following"),
+			help_line("Enter", "Open connection details"),
+			help_line("Esc", "Close a dialog or finish searching"),
+			help_line("q", "Quit Puppy TUI"),
+		])
+		.style(Style::default().fg(TEXT).bg(SURFACE))
+		.block(panel("KEYBOARD SHORTCUTS", CYAN).padding(Padding::new(2, 2, 1, 1)))
 		.wrap(Wrap { trim: false }),
 		area,
 	);
@@ -808,17 +1174,118 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		return;
 	};
 	frame.render_widget(Clear, area);
-	let text = format!("ID: {}\nStatus: {}\nServer instance: {}\nFrontend: {}\nBackend: {}\nClient: {}\nTarget: {}:{}\nNetwork/Protocol: {}/{}\nStarted: {}\nClosed: {}\nDuration: {}\nInbound/Outbound: {} / {}\nClose reason: {}", value.id, status_name(value.status), value.server_instance_id, value.frontend, dash(&value.backend), value.remote_addr, value.target_host, value.target_port, value.network, value.protocol, timestamp_text(value.started_at.as_ref()), timestamp_text(value.closed_at.as_ref()), format_duration(value.duration_ms / 1_000), bytes(value.bytes_in), bytes(value.bytes_out), dash(&value.close_reason));
 	frame.render_widget(
-		Paragraph::new(text)
-			.block(
-				Block::default()
-					.title(" Connection details  Enter/Esc Close ")
-					.borders(Borders::ALL),
-			)
-			.wrap(Wrap { trim: false }),
+		Paragraph::new(vec![
+			detail_line("ID", value.id.clone()),
+			detail_line("Status", status_name(value.status).to_string()),
+			detail_line("Server instance", value.server_instance_id.clone()),
+			detail_line("Frontend", value.frontend.clone()),
+			detail_line("Backend", dash(&value.backend).to_string()),
+			detail_line("Client", value.remote_addr.clone()),
+			detail_line(
+				"Target",
+				format!("{}:{}", value.target_host, value.target_port),
+			),
+			detail_line(
+				"Network / Protocol",
+				format!("{} / {}", value.network, value.protocol),
+			),
+			detail_line("Started", timestamp_text(value.started_at.as_ref())),
+			detail_line("Closed", timestamp_text(value.closed_at.as_ref())),
+			detail_line("Duration", format_duration(value.duration_ms / 1_000)),
+			detail_line(
+				"Inbound / Outbound",
+				format!("{} / {}", bytes(value.bytes_in), bytes(value.bytes_out)),
+			),
+			detail_line("Close reason", dash(&value.close_reason).to_string()),
+		])
+		.style(Style::default().fg(TEXT).bg(SURFACE))
+		.block(
+			panel("CONNECTION DETAILS", CYAN)
+				.title_bottom(Line::styled(
+					" Enter / Esc to close ",
+					Style::default().fg(MUTED),
+				))
+				.padding(Padding::horizontal(2)),
+		)
+		.wrap(Wrap { trim: false }),
 		area,
 	);
+}
+
+fn panel(title: &str, accent: Color) -> Block<'static> {
+	Block::default()
+		.borders(Borders::ALL)
+		.border_type(BorderType::Rounded)
+		.border_style(Style::default().fg(BORDER))
+		.style(Style::default().bg(SURFACE))
+		.title(Line::from(Span::styled(
+			format!(" {title} "),
+			Style::default().fg(accent).bold(),
+		)))
+}
+
+fn chip_style(color: Color) -> Style {
+	Style::default().fg(BACKGROUND).bg(color).bold()
+}
+
+fn key_hint(key: &str, label: &str) -> Vec<Span<'static>> {
+	vec![
+		Span::styled(format!(" {key} "), chip_style(BORDER)),
+		Span::styled(format!(" {label}  "), Style::default().fg(MUTED)),
+	]
+}
+
+fn help_line(key: &str, description: &str) -> Line<'static> {
+	Line::from(vec![
+		Span::styled(format!(" {key:<12}"), Style::default().fg(CYAN).bold()),
+		Span::styled(description.to_string(), Style::default().fg(TEXT)),
+	])
+}
+
+fn detail_line(label: &str, value: String) -> Line<'static> {
+	Line::from(vec![
+		Span::styled(format!("{label:<20}"), Style::default().fg(MUTED)),
+		Span::styled(value, Style::default().fg(TEXT).bold()),
+	])
+}
+
+fn connection_status_style(value: i32) -> Style {
+	match ConnectionStatus::try_from(value).unwrap_or_default() {
+		ConnectionStatus::Active => Style::default().fg(GREEN).bold(),
+		ConnectionStatus::Closed => Style::default().fg(MUTED),
+		ConnectionStatus::Interrupted => Style::default().fg(RED),
+		_ => Style::default().fg(YELLOW),
+	}
+}
+
+fn log_level_color(level: &str) -> Color {
+	match level {
+		"ERROR" => RED,
+		"WARN" => YELLOW,
+		"INFO" => GREEN,
+		"DEBUG" => BLUE,
+		"TRACE" => MUTED,
+		_ => MUTED,
+	}
+}
+
+fn inset(area: Rect, horizontal: u16, vertical: u16) -> Rect {
+	Rect {
+		x: area.x.saturating_add(horizontal),
+		y: area.y.saturating_add(vertical),
+		width: area.width.saturating_sub(horizontal.saturating_mul(2)),
+		height: area.height.saturating_sub(vertical.saturating_mul(2)),
+	}
+}
+
+fn centered_row(area: Rect) -> Rect {
+	Rect {
+		x: area.x,
+		y: area.y.saturating_add(area.height.saturating_sub(1) / 2),
+		width: area.width,
+		height: area.height.min(1),
+	}
 }
 
 fn centered(width: u16, height: u16, area: Rect) -> Rect {
@@ -929,6 +1396,7 @@ fn level_rank(level: &str) -> u8 {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use ratatui::backend::TestBackend;
 
 	#[test]
 	fn formats_bytes() {
@@ -946,5 +1414,115 @@ mod tests {
 		handle_key(&mut app, KeyCode::Char('/'));
 		handle_key(&mut app, KeyCode::Char('x'));
 		assert_eq!(app.query, "x");
+	}
+
+	#[test]
+	fn dashboard_pages_render_at_minimum_size() {
+		let mut app = populated_app();
+		for (page, expected) in [
+			(Page::Overview, "SERVER STATUS"),
+			(Page::Connections, "CONNECTION EXPLORER"),
+			(Page::Traffic, "INBOUND RATE"),
+			(Page::Logs, "LOG STREAM"),
+		] {
+			app.page = page;
+			let rendered = render_text(&app, 80, 24);
+			assert!(rendered.contains("PUPPY"));
+			assert!(rendered.contains(expected), "missing {expected}");
+		}
+	}
+
+	#[test]
+	fn overlays_render_with_dashboard_theme() {
+		let mut app = populated_app();
+		app.help = true;
+		assert!(render_text(&app, 100, 32).contains("KEYBOARD SHORTCUTS"));
+		app.help = false;
+		app.page = Page::Connections;
+		app.detail = true;
+		assert!(render_text(&app, 100, 32).contains("CONNECTION DETAILS"));
+	}
+
+	#[test]
+	fn connections_table_adapts_to_terminal_width() {
+		let mut app = populated_app();
+		app.page = Page::Connections;
+		let compact = render_text(&app, 80, 24);
+		assert!(compact.contains("Outbound"));
+		assert!(!compact.contains("Frontend"));
+		let wide = render_text(&app, 140, 32);
+		assert!(wide.contains("Frontend"));
+		assert!(wide.contains("Protocol"));
+	}
+
+	fn populated_app() -> App {
+		let mut app = App {
+			connected: true,
+			status: "Connected".to_string(),
+			overview: Some(Overview {
+				api_version: "v1".to_string(),
+				server_version: "0.1.0".to_string(),
+				server_instance_id: "puppy-test-instance".to_string(),
+				uptime_seconds: 3_661.0,
+				pid: 1_234,
+				process_total_connections: 42,
+				active_connections: 3,
+				dial_successes: 40,
+				dial_failures: 2,
+				process_bytes_in: 1_048_576,
+				process_bytes_out: 2_097_152,
+				all_time_connections: 420,
+				all_time_bytes_in: 10_485_760,
+				all_time_bytes_out: 20_971_520,
+				..Overview::default()
+			}),
+			..App::default()
+		};
+		let connection = Connection {
+			id: "connection-0001".to_string(),
+			status: ConnectionStatus::Active as i32,
+			frontend: "local_http_proxy".to_string(),
+			remote_addr: "127.0.0.1:54321".to_string(),
+			target_host: "example.com".to_string(),
+			target_port: 443,
+			protocol: "https".to_string(),
+			bytes_in: 4_096,
+			bytes_out: 8_192,
+			..Connection::default()
+		};
+		app.connections.insert(connection.id.clone(), connection);
+		app.traffic.push_back(TrafficSample {
+			bytes_in_per_second: 12_000,
+			bytes_out_per_second: 8_000,
+			active_connections: 3,
+			process_bytes_in: 1_048_576,
+			process_bytes_out: 2_097_152,
+			all_time_bytes_in: 10_485_760,
+			all_time_bytes_out: 20_971_520,
+			..TrafficSample::default()
+		});
+		app.logs.push_back(LogEntry {
+			level: "INFO".to_string(),
+			target: "puppy::server".to_string(),
+			message: "proxy server is ready".to_string(),
+			..LogEntry::default()
+		});
+		app
+	}
+
+	fn render_text(app: &App, width: u16, height: u16) -> String {
+		let backend = TestBackend::new(width, height);
+		let mut terminal = Terminal::new(backend).expect("test terminal");
+		terminal
+			.draw(|frame| draw(frame, app))
+			.expect("dashboard render");
+		terminal
+			.backend()
+			.buffer()
+			.content()
+			.chunks(width as usize)
+			.map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+			.collect::<Vec<_>>()
+			.join("\n")
 	}
 }
