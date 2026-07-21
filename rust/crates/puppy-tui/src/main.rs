@@ -98,6 +98,7 @@ struct App {
 	logs: VecDeque<LogEntry>,
 	traffic: VecDeque<TrafficSample>,
 	selected: usize,
+	connection_offset: usize,
 	searching: bool,
 	query: String,
 	log_query: String,
@@ -120,6 +121,7 @@ impl Default for App {
 			logs: VecDeque::new(),
 			traffic: VecDeque::new(),
 			selected: 0,
+			connection_offset: 0,
 			searching: false,
 			query: String::new(),
 			log_query: String::new(),
@@ -238,7 +240,7 @@ async fn main() -> Result<()> {
 	let mut app = App::default();
 	let mut tick = tokio::time::interval(Duration::from_millis(100));
 	let result = loop {
-		if let Err(error) = terminal.draw(|frame| draw(frame, &app)) {
+		if let Err(error) = terminal.draw(|frame| draw(frame, &mut app)) {
 			break Err(error.into());
 		}
 		tokio::select! {
@@ -470,6 +472,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 				_ => ConnectionStatus::Unspecified as i32,
 			};
 			app.selected = 0;
+			app.connection_offset = 0;
 		}
 		KeyCode::Char('s') if app.page == Page::Connections => app.descending = !app.descending,
 		KeyCode::Char(' ') if app.page == Page::Logs => {
@@ -488,7 +491,14 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 			}
 			.to_string();
 		}
-		KeyCode::Down | KeyCode::Char('j') => app.selected = app.selected.saturating_add(1),
+		KeyCode::Down | KeyCode::Char('j') => {
+			let last = match app.page {
+				Page::Connections => app.visible_connections().len().saturating_sub(1),
+				Page::Logs => app.visible_logs().len().saturating_sub(1),
+				_ => app.selected,
+			};
+			app.selected = app.selected.saturating_add(1).min(last);
+		}
 		KeyCode::Up | KeyCode::Char('k') => app.selected = app.selected.saturating_sub(1),
 		KeyCode::PageDown => app.selected = app.selected.saturating_add(10),
 		KeyCode::PageUp => app.selected = app.selected.saturating_sub(10),
@@ -502,7 +512,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> bool {
 	false
 }
 
-fn draw(frame: &mut Frame<'_>, app: &App) {
+fn draw(frame: &mut Frame<'_>, app: &mut App) {
 	let size = frame.area();
 	frame.render_widget(
 		Block::default().style(Style::default().bg(BACKGROUND)),
@@ -817,9 +827,10 @@ fn metric_card(
 	);
 }
 
-fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &App) {
-	let values = app.visible_connections();
-	let selected = app.selected.min(values.len().saturating_sub(1));
+fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
+	let value_count = app.visible_connections().len();
+	app.selected = app.selected.min(value_count.saturating_sub(1));
+	let selected = app.selected;
 	let filter = match app.status_filter {
 		x if x == ConnectionStatus::Active as i32 => "Active",
 		x if x == ConnectionStatus::Closed as i32 => "Closed",
@@ -833,6 +844,11 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &App) {
 			Constraint::Min(1),
 		])
 		.split(area);
+	let visible_rows = layout[2].height.saturating_sub(3) as usize;
+	app.connection_offset =
+		connection_viewport_offset(app.connection_offset, selected, value_count, visible_rows);
+	let connection_offset = app.connection_offset;
+	let values = app.visible_connections();
 	let search = if app.searching {
 		format!("{}▌", app.query)
 	} else if app.query.is_empty() {
@@ -862,40 +878,47 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		layout[0],
 	);
 	let compact = layout[2].width < 110;
-	let rows = values.iter().enumerate().map(|(index, value)| {
-		let cells = if compact {
-			vec![
-				Cell::from(if index == selected { "▌" } else { "" })
-					.style(Style::default().fg(CYAN)),
-				Cell::from(status_name(value.status)).style(connection_status_style(value.status)),
-				Cell::from(value.remote_addr.clone()),
-				Cell::from(format!("{}:{}", value.target_host, value.target_port)),
-				Cell::from(bytes(value.bytes_in)).style(Style::default().fg(CYAN)),
-				Cell::from(bytes(value.bytes_out)).style(Style::default().fg(MAGENTA)),
-			]
-		} else {
-			vec![
-				Cell::from(if index == selected { "▌" } else { "" })
-					.style(Style::default().fg(CYAN)),
-				Cell::from(short(&value.id)),
-				Cell::from(status_name(value.status)).style(connection_status_style(value.status)),
-				Cell::from(value.frontend.clone()),
-				Cell::from(value.remote_addr.clone()),
-				Cell::from(format!("{}:{}", value.target_host, value.target_port)),
-				Cell::from(value.protocol.clone()).style(Style::default().fg(BLUE)),
-				Cell::from(bytes(value.bytes_in)).style(Style::default().fg(CYAN)),
-				Cell::from(bytes(value.bytes_out)).style(Style::default().fg(MAGENTA)),
-			]
-		};
-		let row = Row::new(cells);
-		if index == selected {
-			row.style(Style::default().fg(TEXT).bg(SURFACE_ALT).bold())
-		} else if index % 2 == 1 {
-			row.style(Style::default().fg(TEXT).bg(SURFACE))
-		} else {
-			row.style(Style::default().fg(TEXT).bg(BACKGROUND))
-		}
-	});
+	let rows = values
+		.iter()
+		.enumerate()
+		.skip(connection_offset)
+		.take(visible_rows)
+		.map(|(index, value)| {
+			let cells = if compact {
+				vec![
+					Cell::from(if index == selected { "▌" } else { "" })
+						.style(Style::default().fg(CYAN)),
+					Cell::from(status_name(value.status))
+						.style(connection_status_style(value.status)),
+					Cell::from(value.remote_addr.clone()),
+					Cell::from(format!("{}:{}", value.target_host, value.target_port)),
+					Cell::from(bytes(value.bytes_in)).style(Style::default().fg(CYAN)),
+					Cell::from(bytes(value.bytes_out)).style(Style::default().fg(MAGENTA)),
+				]
+			} else {
+				vec![
+					Cell::from(if index == selected { "▌" } else { "" })
+						.style(Style::default().fg(CYAN)),
+					Cell::from(short(&value.id)),
+					Cell::from(status_name(value.status))
+						.style(connection_status_style(value.status)),
+					Cell::from(value.frontend.clone()),
+					Cell::from(value.remote_addr.clone()),
+					Cell::from(format!("{}:{}", value.target_host, value.target_port)),
+					Cell::from(value.protocol.clone()).style(Style::default().fg(BLUE)),
+					Cell::from(bytes(value.bytes_in)).style(Style::default().fg(CYAN)),
+					Cell::from(bytes(value.bytes_out)).style(Style::default().fg(MAGENTA)),
+				]
+			};
+			let row = Row::new(cells);
+			if index == selected {
+				row.style(Style::default().fg(TEXT).bg(SURFACE_ALT).bold())
+			} else if index % 2 == 1 {
+				row.style(Style::default().fg(TEXT).bg(SURFACE))
+			} else {
+				row.style(Style::default().fg(TEXT).bg(BACKGROUND))
+			}
+		});
 	let (widths, labels) = if compact {
 		(
 			vec![
@@ -937,7 +960,7 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		Table::new(rows, widths)
 			.header(header)
 			.column_spacing(1)
-			.block(panel(&format!("CONNECTIONS  {}", values.len()), CYAN)),
+			.block(panel(&format!("CONNECTIONS  {value_count}"), CYAN)),
 		layout[2],
 	);
 }
@@ -1250,6 +1273,36 @@ fn detail_line(label: &str, value: String) -> Line<'static> {
 	])
 }
 
+fn connection_viewport_offset(
+	current: usize,
+	selected: usize,
+	total: usize,
+	capacity: usize,
+) -> usize {
+	if total == 0 || capacity == 0 || total <= capacity {
+		return 0;
+	}
+	let capacity = capacity.min(total);
+	let max_offset = total.saturating_sub(capacity);
+	let current = current.min(max_offset);
+	let margin = 2.min(capacity.saturating_sub(1) / 2);
+	let upper_guard = current.saturating_add(margin);
+	let lower_guard = current
+		.saturating_add(capacity.saturating_sub(1))
+		.saturating_sub(margin);
+	if selected < upper_guard {
+		selected.saturating_sub(margin).min(max_offset)
+	} else if selected > lower_guard {
+		selected
+			.saturating_add(margin)
+			.saturating_add(1)
+			.saturating_sub(capacity)
+			.min(max_offset)
+	} else {
+		current
+	}
+}
+
 fn connection_status_style(value: i32) -> Style {
 	match ConnectionStatus::try_from(value).unwrap_or_default() {
 		ConnectionStatus::Active => Style::default().fg(GREEN).bold(),
@@ -1426,7 +1479,7 @@ mod tests {
 			(Page::Logs, "LOG STREAM"),
 		] {
 			app.page = page;
-			let rendered = render_text(&app, 80, 24);
+			let rendered = render_text(&mut app, 80, 24);
 			assert!(rendered.contains("PUPPY"));
 			assert!(rendered.contains(expected), "missing {expected}");
 		}
@@ -1436,23 +1489,64 @@ mod tests {
 	fn overlays_render_with_dashboard_theme() {
 		let mut app = populated_app();
 		app.help = true;
-		assert!(render_text(&app, 100, 32).contains("KEYBOARD SHORTCUTS"));
+		assert!(render_text(&mut app, 100, 32).contains("KEYBOARD SHORTCUTS"));
 		app.help = false;
 		app.page = Page::Connections;
 		app.detail = true;
-		assert!(render_text(&app, 100, 32).contains("CONNECTION DETAILS"));
+		assert!(render_text(&mut app, 100, 32).contains("CONNECTION DETAILS"));
 	}
 
 	#[test]
 	fn connections_table_adapts_to_terminal_width() {
 		let mut app = populated_app();
 		app.page = Page::Connections;
-		let compact = render_text(&app, 80, 24);
+		let compact = render_text(&mut app, 80, 24);
 		assert!(compact.contains("Outbound"));
 		assert!(!compact.contains("Frontend"));
-		let wide = render_text(&app, 140, 32);
+		let wide = render_text(&mut app, 140, 32);
 		assert!(wide.contains("Frontend"));
 		assert!(wide.contains("Protocol"));
+	}
+
+	#[test]
+	fn connection_viewport_tracks_selection_in_both_directions() {
+		let offset = connection_viewport_offset(0, 7, 30, 10);
+		assert_eq!(offset, 0);
+		let offset = connection_viewport_offset(offset, 8, 30, 10);
+		assert_eq!(offset, 1);
+		let offset = connection_viewport_offset(10, 12, 30, 10);
+		assert_eq!(offset, 10);
+		let offset = connection_viewport_offset(offset, 11, 30, 10);
+		assert_eq!(offset, 9);
+		assert_eq!(connection_viewport_offset(9, 0, 5, 10), 0);
+	}
+
+	#[test]
+	fn connections_render_scrolls_selected_row_into_view() {
+		let mut app = populated_app();
+		app.page = Page::Connections;
+		for index in 0..24 {
+			let connection = Connection {
+				id: format!("connection-{index:04}"),
+				status: ConnectionStatus::Active as i32,
+				remote_addr: format!("127.0.0.1:{}", 20_000 + index),
+				target_host: format!("target-{index}.example"),
+				target_port: 443,
+				started_at: Some(prost_types::Timestamp {
+					seconds: index as i64,
+					nanos: 0,
+				}),
+				..Connection::default()
+			};
+			app.connections.insert(connection.id.clone(), connection);
+		}
+		app.selected = 18;
+		let rendered = render_text(&mut app, 80, 24);
+		assert!(app.connection_offset > 0);
+		assert!(rendered.contains('▌'));
+		app.selected = 0;
+		render_text(&mut app, 80, 24);
+		assert_eq!(app.connection_offset, 0);
 	}
 
 	fn populated_app() -> App {
@@ -1510,7 +1604,7 @@ mod tests {
 		app
 	}
 
-	fn render_text(app: &App, width: u16, height: u16) -> String {
+	fn render_text(app: &mut App, width: u16, height: u16) -> String {
 		let backend = TestBackend::new(width, height);
 		let mut terminal = Terminal::new(backend).expect("test terminal");
 		terminal
