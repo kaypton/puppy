@@ -100,7 +100,7 @@ impl Default for App {
 		Self {
 			page: Page::Overview,
 			connected: false,
-			status: "正在连接…".to_string(),
+			status: "Connecting...".to_string(),
 			overview: None,
 			connections: HashMap::new(),
 			logs: VecDeque::new(),
@@ -124,11 +124,11 @@ impl App {
 		match event {
 			NetworkEvent::Connected => {
 				self.connected = true;
-				self.status = "已连接".to_string();
+				self.status = "Connected".to_string();
 			}
 			NetworkEvent::Disconnected(error) => {
 				self.connected = false;
-				self.status = format!("连接中断：{error}（自动重连）");
+				self.status = format!("Disconnected: {error} (reconnecting)");
 			}
 			NetworkEvent::Overview(value) => self.overview = Some(value),
 			NetworkEvent::Connections(values) => {
@@ -256,7 +256,9 @@ async fn connection_loop(cli: Cli, token: Option<String>, tx: mpsc::Sender<Netwo
 				match run_connected(&mut client, &tx).await {
 					Ok(()) => {
 						let _ = tx
-							.send(NetworkEvent::Disconnected("服务端关闭了事件流".to_string()))
+							.send(NetworkEvent::Disconnected(
+								"The server closed an event stream".to_string(),
+							))
 							.await;
 					}
 					Err(error) => {
@@ -298,7 +300,7 @@ async fn connect_client(cli: &Cli, token: &Option<String>) -> Result<AuthClient>
 		let mut tls = ClientTlsConfig::new();
 		if let Some(path) = &cli.ca_cert {
 			tls = tls.ca_certificate(Certificate::from_pem(
-				tokio::fs::read(path).await.context("读取 CA 证书")?,
+				tokio::fs::read(path).await.context("read CA certificate")?,
 			));
 		}
 		if let Some(name) = &cli.server_name {
@@ -306,14 +308,14 @@ async fn connect_client(cli: &Cli, token: &Option<String>) -> Result<AuthClient>
 		}
 		endpoint = endpoint.tls_config(tls)?;
 	} else if cli.ca_cert.is_some() || cli.server_name.is_some() {
-		anyhow::bail!("--ca-cert/--server-name 只能用于 https:// endpoint");
+		anyhow::bail!("--ca-cert/--server-name require an https:// endpoint");
 	}
 	let channel = endpoint.connect().await?;
 	let token = token
 		.as_ref()
 		.map(|token| format!("Bearer {token}").parse())
 		.transpose()
-		.context("token 不是合法的 gRPC metadata")?;
+		.context("token is not valid gRPC metadata")?;
 	Ok(AuthClient {
 		inner: ObservabilityClient::new(channel),
 		token,
@@ -366,6 +368,7 @@ async fn run_connected(client: &mut AuthClient, tx: &mpsc::Sender<NetworkEvent>)
 	let mut connection_client = client.clone();
 	let mut log_client = client.clone();
 	let mut traffic_client = client.clone();
+	let mut overview_client = client.clone();
 	let connection_request = connection_client.request(WatchConnectionsRequest {
 		include_initial: true,
 	});
@@ -385,8 +388,16 @@ async fn run_connected(client: &mut AuthClient, tx: &mpsc::Sender<NetworkEvent>)
 		.watch_traffic(traffic_request)
 		.await?
 		.into_inner();
+	let mut overview_tick = tokio::time::interval(Duration::from_secs(1));
+	overview_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+	overview_tick.tick().await;
 	loop {
 		tokio::select! {
+			_ = overview_tick.tick() => {
+				let request = overview_client.request(());
+				let overview = overview_client.inner.get_overview(request).await?.into_inner();
+				tx.send(NetworkEvent::Overview(overview)).await?;
+			}
 			value = connections.message() => match value? { Some(value) => tx.send(NetworkEvent::Connection(value)).await?, None => return Ok(()) },
 			value = logs.message() => match value? { Some(value) => tx.send(NetworkEvent::Log(value)).await?, None => return Ok(()) },
 			value = traffic.message() => match value? { Some(value) => tx.send(NetworkEvent::Traffic(value)).await?, None => return Ok(()) },
@@ -481,7 +492,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 	let size = frame.area();
 	if size.width < 80 || size.height < 24 {
 		frame.render_widget(
-			Paragraph::new("终端尺寸过小，需要至少 80x24")
+			Paragraph::new("Terminal is too small; minimum size is 80x24")
 				.alignment(Alignment::Center)
 				.block(Block::default().borders(Borders::ALL)),
 			size,
@@ -496,7 +507,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 			Constraint::Length(1),
 		])
 		.split(size);
-	let titles = ["1 概览", "2 连接", "3 流量", "4 日志"]
+	let titles = ["1 Overview", "2 Connections", "3 Traffic", "4 Logs"]
 		.into_iter()
 		.map(Line::from)
 		.collect::<Vec<_>>();
@@ -525,7 +536,7 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 	frame.render_widget(
 		Paragraph::new(Line::from(vec![
 			Span::styled(&app.status, Style::default().fg(color)),
-			Span::raw("   ? 帮助   q 退出"),
+			Span::raw("   ? Help   q Quit"),
 		])),
 		layout[2],
 	);
@@ -540,7 +551,8 @@ fn draw(frame: &mut Frame<'_>, app: &App) {
 fn draw_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	let Some(value) = &app.overview else {
 		frame.render_widget(
-			Paragraph::new("等待服务端概览…").block(Block::default().borders(Borders::ALL)),
+			Paragraph::new("Waiting for server overview...")
+				.block(Block::default().borders(Borders::ALL)),
 			area,
 		);
 		return;
@@ -558,16 +570,16 @@ fn draw_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		.constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
 		.split(rows[1]);
 	let status = if value.degraded {
-		format!("降级：{}", value.degraded_reason)
+		format!("Degraded: {}", value.degraded_reason)
 	} else {
-		"正常".to_string()
+		"Healthy".to_string()
 	};
 	metric(
 		frame,
 		top[0],
-		"服务",
+		"Server",
 		format!(
-			"状态: {status}\n版本: {} / API {}\n实例: {}\nPID: {}\n运行: {}",
+			"Status: {status}\nVersion: {} / API {}\nInstance: {}\nPID: {}\nUptime: {}",
 			value.server_version,
 			value.api_version,
 			short(&value.server_instance_id),
@@ -578,9 +590,9 @@ fn draw_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	metric(
 		frame,
 		top[1],
-		"连接",
+		"Connections",
 		format!(
-			"活跃: {}\n本次累计: {}\n历史累计: {}\n拨号成功/失败: {}/{}",
+			"Active: {}\nProcess total: {}\nAll-time total: {}\nDial success/failure: {}/{}",
 			value.active_connections,
 			value.process_total_connections,
 			value.all_time_connections,
@@ -591,9 +603,9 @@ fn draw_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	metric(
 		frame,
 		bottom[0],
-		"本次流量",
+		"Process traffic",
 		format!(
-			"入站: {}\n出站: {}",
+			"Inbound: {}\nOutbound: {}",
 			bytes(value.process_bytes_in),
 			bytes(value.process_bytes_out)
 		),
@@ -601,9 +613,9 @@ fn draw_overview(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	metric(
 		frame,
 		bottom[1],
-		"历史流量",
+		"All-time traffic",
 		format!(
-			"入站: {}\n出站: {}",
+			"Inbound: {}\nOutbound: {}",
 			bytes(value.all_time_bytes_in),
 			bytes(value.all_time_bytes_out)
 		),
@@ -623,15 +635,15 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &App) {
 	let values = app.visible_connections();
 	let selected = app.selected.min(values.len().saturating_sub(1));
 	let filter = match app.status_filter {
-		x if x == ConnectionStatus::Active as i32 => "活跃",
-		x if x == ConnectionStatus::Closed as i32 => "已关闭",
-		_ => "全部",
+		x if x == ConnectionStatus::Active as i32 => "Active",
+		x if x == ConnectionStatus::Closed as i32 => "Closed",
+		_ => "All",
 	};
 	let title = if app.searching {
-		format!(" 连接  搜索: {}_ ", app.query)
+		format!(" Connections  Search: {}_ ", app.query)
 	} else {
 		format!(
-			" 连接 {}  筛选:{filter}  /搜索 f筛选 s排序 Enter详情 ",
+			" Connections {}  Filter:{filter}  / Search  f Filter  s Sort  Enter Details ",
 			values.len()
 		)
 	};
@@ -660,15 +672,7 @@ fn draw_connections(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		Constraint::Length(10),
 	];
 	let header = Row::new([
-		"",
-		"ID",
-		"状态",
-		"Frontend",
-		"客户端",
-		"目标",
-		"协议",
-		"入站",
-		"出站",
+		"", "ID", "Status", "Frontend", "Client", "Target", "Protocol", "Inbound", "Outbound",
 	])
 	.style(
 		Style::default()
@@ -705,7 +709,7 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		.max(1);
 	frame.render_widget(
 		Paragraph::new(format!(
-			"当前入站 {}/s    当前出站 {}/s    活跃连接 {}\n本次累计 ↓{} ↑{}    历史累计 ↓{} ↑{}",
+			"Current inbound {}/s    Current outbound {}/s    Active connections {}\nProcess total ↓{} ↑{}    All-time total ↓{} ↑{}",
 			bytes(inbound),
 			bytes(outbound),
 			latest.map_or(0, |v| v.active_connections),
@@ -714,7 +718,7 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 			bytes(latest.map_or(0, |v| v.all_time_bytes_in)),
 			bytes(latest.map_or(0, |v| v.all_time_bytes_out))
 		))
-		.block(Block::default().title(" 流量 ").borders(Borders::ALL)),
+		.block(Block::default().title(" Traffic ").borders(Borders::ALL)),
 		rows[0],
 	);
 	let in_data: Vec<u64> = app.traffic.iter().map(|v| v.bytes_in_per_second).collect();
@@ -723,7 +727,7 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		Sparkline::default()
 			.block(
 				Block::default()
-					.title(" 入站速率（最近 120 秒） ")
+					.title(" Inbound rate (last 120 seconds) ")
 					.borders(Borders::ALL),
 			)
 			.data(&in_data)
@@ -735,7 +739,7 @@ fn draw_traffic(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		Sparkline::default()
 			.block(
 				Block::default()
-					.title(" 出站速率（最近 120 秒） ")
+					.title(" Outbound rate (last 120 seconds) ")
 					.borders(Borders::ALL),
 			)
 			.data(&out_data)
@@ -767,12 +771,16 @@ fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 			Span::raw(format!(" {:20} {}", short(&entry.target), entry.message)),
 		]))
 	});
-	let mode = if app.follow_logs { "跟随" } else { "暂停" };
+	let mode = if app.follow_logs {
+		"Following"
+	} else {
+		"Paused"
+	};
 	let title = if app.searching {
-		format!(" 日志 搜索: {}_ ", app.log_query)
+		format!(" Logs  Search: {}_ ", app.log_query)
 	} else {
 		format!(
-			" 日志 {mode}  最低级别:{}  /搜索 l级别 Space暂停/继续 ",
+			" Logs {mode}  Minimum level:{}  / Search  l Level  Space Pause/Resume ",
 			app.min_log_level
 		)
 	};
@@ -784,7 +792,14 @@ fn draw_logs(frame: &mut Frame<'_>, area: Rect, app: &App) {
 
 fn draw_help(frame: &mut Frame<'_>, area: Rect) {
 	frame.render_widget(Clear, area);
-	frame.render_widget(Paragraph::new("1–4 切换页面\nj/k 或方向键移动\n/ 搜索连接或日志\nf 连接状态筛选   s 连接排序\nl 日志最低级别   Enter 查看详情\nSpace 暂停/继续日志跟随\nEsc 关闭弹窗  q 退出").block(Block::default().title(" 帮助 ").borders(Borders::ALL)).wrap(Wrap { trim: false }), area);
+	frame.render_widget(
+		Paragraph::new(
+			"1–4 Switch pages\nj/k or arrow keys Move\n/ Search connections or logs\nf Filter connection status   s Sort connections\nl Set minimum log level   Enter View details\nSpace Pause/resume log following\nEsc Close dialog   q Quit",
+		)
+		.block(Block::default().title(" Help ").borders(Borders::ALL))
+		.wrap(Wrap { trim: false }),
+		area,
+	);
 }
 
 fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
@@ -793,12 +808,12 @@ fn draw_detail(frame: &mut Frame<'_>, area: Rect, app: &App) {
 		return;
 	};
 	frame.render_widget(Clear, area);
-	let text = format!("ID: {}\n状态: {}\n服务实例: {}\nFrontend: {}\nBackend: {}\n客户端: {}\n目标: {}:{}\n网络/协议: {}/{}\n开始: {}\n结束: {}\n持续: {}\n入站/出站: {} / {}\n关闭原因: {}", value.id, status_name(value.status), value.server_instance_id, value.frontend, dash(&value.backend), value.remote_addr, value.target_host, value.target_port, value.network, value.protocol, timestamp_text(value.started_at.as_ref()), timestamp_text(value.closed_at.as_ref()), format_duration(value.duration_ms / 1_000), bytes(value.bytes_in), bytes(value.bytes_out), dash(&value.close_reason));
+	let text = format!("ID: {}\nStatus: {}\nServer instance: {}\nFrontend: {}\nBackend: {}\nClient: {}\nTarget: {}:{}\nNetwork/Protocol: {}/{}\nStarted: {}\nClosed: {}\nDuration: {}\nInbound/Outbound: {} / {}\nClose reason: {}", value.id, status_name(value.status), value.server_instance_id, value.frontend, dash(&value.backend), value.remote_addr, value.target_host, value.target_port, value.network, value.protocol, timestamp_text(value.started_at.as_ref()), timestamp_text(value.closed_at.as_ref()), format_duration(value.duration_ms / 1_000), bytes(value.bytes_in), bytes(value.bytes_out), dash(&value.close_reason));
 	frame.render_widget(
 		Paragraph::new(text)
 			.block(
 				Block::default()
-					.title(" 连接详情 Enter/Esc关闭 ")
+					.title(" Connection details  Enter/Esc Close ")
 					.borders(Borders::ALL),
 			)
 			.wrap(Wrap { trim: false }),
@@ -864,10 +879,10 @@ fn dash(value: &str) -> &str {
 }
 fn status_name(value: i32) -> &'static str {
 	match ConnectionStatus::try_from(value).unwrap_or_default() {
-		ConnectionStatus::Active => "活跃",
-		ConnectionStatus::Closed => "已关闭",
-		ConnectionStatus::Interrupted => "中断",
-		_ => "未知",
+		ConnectionStatus::Active => "Active",
+		ConnectionStatus::Closed => "Closed",
+		ConnectionStatus::Interrupted => "Interrupted",
+		_ => "Unknown",
 	}
 }
 fn bytes(value: u64) -> String {

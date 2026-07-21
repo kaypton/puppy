@@ -1,274 +1,219 @@
-# Puppy 代理服务配置示例。
+# Puppy proxy server configuration example.
 #
-# frontend 指定要启动的 frontend 配置组名称。
-# 该值必须与下方 [frontends.<名称>] 中的一个名称完全一致。
-# 本示例默认启动 local_http_proxy；配置组名称可按需修改。
+# frontend selects the frontend group to start. Its value must exactly match one
+# of the names under [frontends.<name>]. This example starts local_http_proxy.
 frontend = "local_http_proxy"
 
-# HTTP CONNECT frontend 配置。
-# local_http_proxy 是用户自定义的配置组名称。
+# HTTP CONNECT frontend. local_http_proxy is a user-defined group name.
 [frontends.local_http_proxy]
-# type 决定该配置组使用哪一种 frontend 实现。
-# 当前支持的 frontend 类型：httpproxy、socksproxy、tun。
+# Supported frontend types are httpproxy, socksproxy, and tun.
 type = "httpproxy"
 
-# listen_address 是代理服务监听的本地 IP 地址。
-# 127.0.0.1 仅允许本机访问；如需接受外部连接可改为 0.0.0.0。
-# 使用 IPv6 时不需要方括号，例如 "::1" 或 "2001:db8::1"。
+# Listener IP address. 127.0.0.1 accepts local connections only; use 0.0.0.0
+# to accept remote connections. Write IPv6 addresses without brackets.
 listen_address = "127.0.0.1"
 
-# listen_port 是代理服务监听的 TCP 端口，取值范围为 1 到 65535。
+# Listener TCP port, from 1 through 65535.
 listen_port = 8848
 
-# 配置 tls_cert_file 和 tls_key_file 后，frontend 将通过 HTTPS 接受代理连接。
-# 两项必须同时配置；同时省略时继续使用普通 HTTP。相对路径基于进程工作目录。
-# 可运行 scripts/generate-proxy-certs.sh 生成本地开发证书，并让客户端信任
-# certs/ca-cert.pem。使用 IP 连接时，该 IP 必须包含在服务证书的 SAN 中。
+# Setting both fields enables HTTPS proxy connections. They must be supplied
+# together; omit both to use plaintext HTTP. Relative paths use the process
+# working directory. scripts/generate-proxy-certs.sh creates development
+# certificates. An IP used by clients must appear in the certificate SAN.
 tls_cert_file = "./certs/proxy-cert.pem"
 tls_key_file = "./certs/proxy-key.pem"
 
-# username 是客户端连接此 HTTP 代理时使用的 Basic Auth 用户名。
-# username 和 password 必须同时填写或同时留空；同时留空表示不启用认证。
+# Basic Authentication credentials. Set both or leave both empty to disable
+# authentication. Protect this file when it contains production credentials.
 username = "test"
-
-# password 是客户端连接此 HTTP 代理时使用的 Basic Auth 密码。
-# 生产环境启用认证时，请妥善限制此配置文件的读取权限。
 password = "test12345"
 
-# camouflage 启用后，服务会隐藏代理专用的认证失败响应。
-# 普通 HTTP 请求将得到 404，认证失败的 CONNECT 请求将得到 405。
+# Camouflage hides proxy-specific authentication failures. Ordinary HTTP
+# requests receive 404 and unauthenticated CONNECT requests receive 405.
 camouflage = true
 
-# camouflage_method 决定伪装方式；省略或留空时默认为 return-404。
-# 当前支持的值：return-404。
+# The supported camouflage method is currently return-404.
 camouflage_method = "return-404"
 
-# backend 指定此 frontend 使用的 backend 配置组名称。
-# 本示例使用 direct_out；如需通过上游 HTTP 代理转发，可改为 upstream_http_proxy；
-# 如需通过上游 SOCKS5 代理转发，可改为 upstream_socks_proxy。
+# Backend group used by this frontend. Replace direct_out with
+# upstream_http_proxy or upstream_socks_proxy to chain through another proxy.
 backend = "direct_out"
 
-# shim 指定此 frontend 使用的 shim 配置组名称。
-# 该值必须与下方 [shims.<名称>] 中的一个名称完全一致。
+# Shim group used by this frontend.
 shim = "default_tunnel"
 
-# Direct backend 配置。
-# direct_out 是用户自定义的配置组名称。
+# Direct backend. It connects to requested targets without another proxy.
 [backends.direct_out]
-# type 决定该配置组使用哪一种 backend 实现。
-# direct 表示不经过其他代理，直接连接客户端请求的目标地址。
 type = "direct"
 
-# Direct backend 当前没有其他实现专属配置选项。
-
-# 上游 HTTP CONNECT proxy backend 配置。
-# 该配置组默认未被 local_http_proxy 使用，但会在启动时被严格校验。
+# Upstream HTTP CONNECT backend. This group is not selected by default, but it
+# is still validated at startup.
 [backends.upstream_http_proxy]
-# type=httpproxy 表示通过另一个 HTTP CONNECT 代理连接最终目标。
 type = "httpproxy"
 
-# proxy_address 是上游 HTTP 代理的地址，必须使用 host:port 格式。
-# IPv6 地址需要使用方括号，例如 [2001:db8::1]:3128。
+# Upstream address in host:port form. Enclose IPv6 addresses in brackets.
 proxy_address = "127.0.0.1:3128"
 
-# username 是连接上游 HTTP 代理时使用的 Basic Auth 用户名。
-# username 和 password 必须同时填写或同时留空；同时留空表示上游无需认证。
+# Upstream Basic Authentication. Set both fields or leave both empty.
 username = ""
-
-# password 是连接上游 HTTP 代理时使用的 Basic Auth 密码。
 password = ""
 
-# tls 启用后，backend 将通过 TLS 连接上游 HTTP 代理（即 https_proxy=https://...）。
-# 省略或为 false 时仍使用明文 TCP。下面的 tls_* 字段仅在 tls = true 时有效。
+# Connect to the upstream proxy with TLS. The tls_* settings below apply only
+# when this value is true.
 tls = false
 
-# tls_ca_file 指定用于校验上游代理服务器证书的 CA 文件（PEM 格式）。
-# 省略时使用系统根证书；可指向本地开发 CA，例如 ./certs/ca-cert.pem。
-# 与 tls_insecure_skip_verify 互斥。
+# CA certificate used to verify the upstream server. Omission uses system roots.
+# This setting is mutually exclusive with tls_insecure_skip_verify.
 # tls_ca_file = "./certs/ca-cert.pem"
 
-# tls_server_name 覆盖 TLS SNI 与证书校验名。
-# 省略时取 proxy_address 的 host 部分。当上游证书 CN/SAN 与 proxy_address 不一致时使用。
+# Override the TLS SNI and certificate verification name. Omission uses the
+# host part of proxy_address.
 # tls_server_name = "proxy.internal"
 
-# tls_insecure_skip_verify 为 true 时跳过上游代理证书校验，仅用于测试。
-# 与 tls_ca_file 互斥。
+# Skip upstream certificate verification. Use only for tests. This setting is
+# mutually exclusive with tls_ca_file.
 # tls_insecure_skip_verify = false
 
-# 上游 SOCKS5 proxy backend 配置。
-# 该配置组默认未被 local_http_proxy 使用，但会在启动时被严格校验。
+# Upstream SOCKS5 backend. This group is not selected by default, but it is
+# still validated at startup.
 [backends.upstream_socks_proxy]
-# type=socksproxy 表示通过一个上游 SOCKS5 代理连接最终目标。
 type = "socksproxy"
 
-# proxy_address 是上游 SOCKS5 代理的地址，必须使用 host:port 格式。
-# IPv6 地址需要使用方括号，例如 [2001:db8::1]:1080。
+# Upstream address in host:port form. Enclose IPv6 addresses in brackets.
 proxy_address = "127.0.0.1:1080"
 
-# username 是连接上游 SOCKS5 代理时使用的用户名（RFC 1929 用户名/密码认证）。
-# username 和 password 必须同时填写或同时留空；同时留空表示上游无需认证。
+# Optional RFC 1929 credentials. Set both fields or leave both empty.
 username = ""
-
-# password 是连接上游 SOCKS5 代理时使用的密码。
 password = ""
 
-# tls 启用后，backend 将通过 TLS 连接上游 SOCKS5 代理。
-# 省略或为 false 时仍使用明文 TCP。下面的 tls_* 字段仅在 tls = true 时有效。
+# Connect to the upstream SOCKS5 proxy with TLS. The tls_* settings below apply
+# only when this value is true.
 tls = false
 
-# tls_ca_file 指定用于校验上游代理服务器证书的 CA 文件（PEM 格式）。
-# 省略时使用系统根证书；可指向本地开发 CA，例如 ./certs/ca-cert.pem。
-# 与 tls_insecure_skip_verify 互斥。
+# CA certificate used to verify the upstream server. Omission uses system roots.
+# This setting is mutually exclusive with tls_insecure_skip_verify.
 # tls_ca_file = "./certs/ca-cert.pem"
 
-# tls_server_name 覆盖 TLS SNI 与证书校验名。
-# 省略时取 proxy_address 的 host 部分。当上游证书 CN/SAN 与 proxy_address 不一致时使用。
+# Override the TLS SNI and certificate verification name. Omission uses the
+# host part of proxy_address.
 # tls_server_name = "proxy.internal"
 
-# tls_insecure_skip_verify 为 true 时跳过上游代理证书校验，仅用于测试。
-# 与 tls_ca_file 互斥。
+# Skip upstream certificate verification. Use only for tests. This setting is
+# mutually exclusive with tls_ca_file.
 # tls_insecure_skip_verify = false
 
-# SOCKS5 frontend 配置（默认未启用，将上方 frontend 改为 local_socks_proxy 即可使用）。
-# SOCKS5 frontend 在本地监听一个 SOCKS5 代理端口，供支持 SOCKS5 的浏览器、CLI 或应用
-# 使用。仅支持 CONNECT 命令（TCP），认证方式为 RFC 1929 用户名/密码或无认证。
-# 可选 tls_cert_file/tls_key_file 把 SOCKS5 套在 TLS 里（SOCKS5-over-TLS，非标准），
-# 便于隐藏或加固 SOCKS5 流量；客户端需以 TLS 连接该端口后再发起 SOCKS5 握手。
+# SOCKS5 frontend. Select it with frontend = "local_socks_proxy". It supports
+# CONNECT (TCP), with optional RFC 1929 authentication. Optional non-standard
+# SOCKS5-over-TLS requires clients to establish TLS before the SOCKS5 handshake.
 [frontends.local_socks_proxy]
-# type 决定该配置组使用哪一种 frontend 实现。
-# 当前支持的 frontend 类型：httpproxy、socksproxy、tun。
 type = "socksproxy"
 
-# listen_address 是代理服务监听的本地 IP 地址。
-# 127.0.0.1 仅允许本机访问；如需接受外部连接可改为 0.0.0.0。
-# 使用 IPv6 时不需要方括号，例如 "::1" 或 "2001:db8::1"。
+# Listener IP address. Write IPv6 addresses without brackets.
 listen_address = "127.0.0.1"
 
-# listen_port 是代理服务监听的 TCP 端口，取值范围为 1 到 65535。
+# Listener TCP port, from 1 through 65535.
 listen_port = 1080
 
-# 配置 tls_cert_file 和 tls_key_file 后，frontend 将通过 TLS 接受 SOCKS5 连接。
-# 两项必须同时配置；同时省略时继续使用普通明文 SOCKS5。相对路径基于进程工作目录。
-# 可运行 scripts/generate-proxy-certs.sh 生成本地开发证书，并让客户端信任
-# certs/ca-cert.pem。使用 IP 连接时，该 IP 必须包含在服务证书的 SAN 中。
+# Set both fields to enable SOCKS5-over-TLS, or omit both for plaintext SOCKS5.
+# Relative paths use the process working directory.
 # tls_cert_file = "./certs/proxy-cert.pem"
 # tls_key_file = "./certs/proxy-key.pem"
 
-# username 是客户端连接此 SOCKS5 代理时使用的用户名（RFC 1929 用户名/密码认证）。
-# username 和 password 必须同时填写或同时留空；同时留空表示不启用认证。
+# Optional RFC 1929 credentials. Set both fields or leave both empty.
 username = "test"
-
-# password 是客户端连接此 SOCKS5 代理时使用的密码。
 password = "test12345"
 
-# backend 指定此 frontend 使用的 backend 配置组名称。
-# 本示例使用 direct_out；如需通过上游 HTTP 代理转发，可改为 upstream_http_proxy；
-# 如需通过上游 SOCKS5 代理转发，可改为 upstream_socks_proxy。
+# Backend and shim groups used by this frontend.
 backend = "direct_out"
-
-# shim 指定此 frontend 使用的 shim 配置组名称。
-# 该值必须与下方 [shims.<名称>] 中的一个名称完全一致。
 shim = "default_tunnel"
 
-# TUN 模式 frontend 配置（默认未启用，将上方 frontend 改为 local_tun 即可使用）。
-# TUN 模式会创建虚拟网卡接管系统默认路由，将本机全部 TCP/UDP 流量经 backend 转发。
-# 需要 root 权限运行：sudo bin/puppy-server --config ./config.toml。
-# 仅支持 macOS（utun）与 Linux（tun）。
+# TUN frontend. Select it with frontend = "local_tun". It creates a virtual
+# interface and forwards host TCP/UDP traffic. It requires root privileges and
+# supports macOS utun and Linux tun.
 [frontends.local_tun]
-# type=tun 表示使用 TUN 模式 frontend。
 type = "tun"
 
-# device_name 指定虚拟网卡名称。留空时由系统自动分配（macOS: utunN, Linux: tunN）。
-# macOS 下可填 "utun5" 等指定具体 unit；Linux 下可填 "tun0" 等。
+# Virtual interface name. Empty lets the OS assign one, such as utunN or tunN.
 device_name = ""
 
-# ipv4_address 是 TUN 网卡的 IPv4 地址，必须使用 CIDR 格式。
-# IPv4/IPv6 至少配置一个；地址会同时配置到系统接口和 gVisor netstack，
-# 因此应选择不与本地网络冲突的网段，例如 10.0.0.1/24。
+# Interface addresses in CIDR form. At least one of IPv4 or IPv6 is required.
+# Choose a range that does not conflict with local networks.
 ipv4_address = "10.0.0.1/24"
-
-# ipv6_address 可选，配置 TUN 网卡的 IPv6 地址，CIDR 格式。
 # ipv6_address = "fd00::1/64"
 
-# mtu 是虚拟网卡的最大传输单元，省略或为 0 时使用默认值 1500。
+# Interface MTU. Zero or omission uses 1500.
 mtu = 1500
 
-# auto_route 为 true（默认）时，启动会通过两条 /1 分流路由接管流量，
-# 同时保留原默认路由，并把 backend 及其 DNS socket 绑定到原物理出口，
-# 避免出站流量再次进入 TUN。退出时删除分流路由。
-# 如果已有 VPN/TUN 正在通过更具体的路由接管公网流量，启动会在修改系统
-# 网络前直接失败；请先关闭已有 VPN，或设为 false 后自行管理兼容路由。
-# 设为 false 时仍会配置并启用 TUN 接口，但路由和 backend 绕行由用户负责。
+# Automatic routing installs two /1 split routes while preserving the original
+# default route, and binds backend and DNS sockets to the original physical
+# egress to prevent loops. Routes are removed on exit. Startup fails before
+# changing the network if another VPN owns more specific public routes. Set
+# false only when routes and backend bypasses are managed externally.
 auto_route = true
 
-# udp_idle_timeout 是 UDP 会话空闲超时秒数，超时后关闭该会话。
-# 省略或 <=0 时使用默认值 30 秒。
+# UDP session idle timeout in seconds. A non-positive value uses 30 seconds.
 udp_idle_timeout = 30
 
-# dns_server 可选，格式为带端口的 IPv4/IPv6 字面量。配置后，目的端口为 53
-# 的 TCP/UDP DNS 流量会重定向到该解析器；UDP 查询会转换为 DNS-over-TCP，
-# 因而也可通过只支持 TCP 的 HTTP CONNECT backend 转发。留空或省略时保持
-# 原有转发行为。为避免 DNS 引导递归，此处不接受主机名。
-# Linux 上同时启用 auto_route 和 ipv4_address 时，还会使用 nft 精确拦截本机
-# 发往 systemd-resolved 127.0.0.53:53 的 TCP/UDP 查询。系统必须安装 nft；
-# auto_route=false、仅配置 IPv6 或 macOS 下不会自动拦截该 loopback 地址。
+# Optional DNS resolver as an IP literal with a port. TCP and UDP traffic to
+# port 53 is redirected here; UDP requests are converted to DNS-over-TCP. Host
+# names are rejected to avoid DNS bootstrap recursion.
+#
+# On Linux with auto_route and ipv4_address enabled, nft also intercepts local
+# queries to systemd-resolved at 127.0.0.53:53. nft must be installed. This
+# loopback interception is not enabled with auto_route=false, IPv6-only, or macOS.
 # dns_server = "1.1.1.1:53"
 # dns_server = "[2606:4700:4700::1111]:53"
 
-# backends 按优先级指定候选 backend。本例保持直接转发；如需让 TCP 通过
-# 上游 HTTP CONNECT proxy，可改为 ["upstream_http_proxy"]，不支持的 UDP
-# 会继续交给下方 fallback。拨号失败不会触发 fallback。
-# 为兼容旧配置，也可只使用 backend = "direct_out"；两种写法不能并存。
+# Candidate backends in priority order. HTTP CONNECT and SOCKS5 backends support
+# TCP only, so unsupported UDP continues to fallback. A failed dial does not
+# trigger fallback. The legacy backend = "direct_out" form is also accepted,
+# but it is mutually exclusive with backends.
 backends = ["direct_out"]
 
-# fallback 在所有候选 backend 都不支持当前流量时使用；省略时默认为内置 direct。
-# 显式 fallback 必须能处理任意 TCP/UDP 应用协议。
+# Used when every candidate backend rejects the traffic type. Omission uses the
+# built-in direct backend. An explicit fallback must support arbitrary TCP/UDP.
 fallback = "direct_out"
 
-# TCP 应用协议探测的最长等待秒数与最大缓存字节数。探测会识别 HTTP/1、
-# HTTP/2 client preface 和 TLS ClientHello，并将缓存内容完整回放给隧道。
+# TCP application protocol detection limits. Detection recognizes HTTP/1,
+# HTTP/2 client prefaces, and TLS ClientHello, then replays the full buffer.
 protocol_detect_timeout = 1
 protocol_detect_max_bytes = 16384
 
-# shim 指定此 frontend 使用的 shim 配置组名称。
+# Shim group used by this frontend.
 shim = "default_tunnel"
 
-# Shim server 配置。
-# default_tunnel 是用户自定义的配置组名称，可被多个 frontend 复用。
+# Reusable bidirectional tunnel settings.
 [shims.default_tunnel]
-# buffer_size 是隧道双向复制时，每个方向使用的缓冲区字节数。
-# 设置为 0 或省略该选项时使用内置默认值 32768（32 KiB）；负数无效。
+# Per-direction copy buffer in bytes. Zero or omission uses 32768; negative
+# values are invalid.
 buffer_size = 32768
 
-# gRPC 只读可观测性 API，供独立 puppy-tui 客户端连接。
+# Read-only gRPC observability API consumed by puppy-tui.
 [grpc]
 enabled = true
 
-# listen_address 是 gRPC 管理面监听的本地 IP 地址。
-# 建议使用 127.0.0.1 限制仅本机访问；如需远程访问请确保网络安全并配置 token。
-# 使用 IPv6 时不需要方括号，例如 "::1" 或 "2001:db8::1"。
+# Management listener. Prefer 127.0.0.1; protect remote listeners with network
+# controls and, where appropriate, TLS and authentication.
 listen_address = "127.0.0.1"
-
-# listen_port 是 gRPC 管理面监听的 TCP 端口。
 listen_port = 50051
 
-# tls_cert_file 和 tls_key_file 启用 TLS gRPC。两项必须同时配置或同时省略。
-# 建议启用 HTTPS 以保护 token 和数据。可复用 proxy 的证书，或单独生成。
-# 省略时使用明文 HTTP（不推荐，除非仅本地访问且不配置 token）。
+# Optional gRPC TLS. Set both fields or omit both for plaintext HTTP. These may
+# reuse the proxy certificate or point to a separately generated certificate.
 tls_cert_file = "./certs/proxy-cert.pem"
 tls_key_file = "./certs/proxy-key.pem"
 
-# token 是 Bearer 认证令牌。非空时所有观测 RPC 请求必须携带
-# Authorization: Bearer <token> 头。留空时关闭认证（仅建议本地监听时使用）。
-# 生产环境请使用足够长的随机字符串。
+# Optional Bearer token. A non-empty value is required in the Authorization
+# header for every RPC; an empty value disables authentication.
 token = "replace-with-a-long-random-token"
 
-# 连接历史和结构化日志存储。相对路径以配置文件所在目录为基准。
+# Connection history and structured log storage. Relative paths use the
+# directory containing this configuration file.
 [observability]
 database_path = "./data/puppy-observability.sqlite3"
 log_directory = "./logs"
 checkpoint_interval_ms = 1000
-# 0 表示永久保留/不限数量。
+
+# Zero means unlimited retention.
 connection_retention_days = 0
 connection_max_rows = 0
 log_retention_days = 0
