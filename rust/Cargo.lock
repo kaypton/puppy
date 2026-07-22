@@ -618,6 +618,64 @@ dependencies = [
 ]
 
 [[package]]
+name = "grpc-tunnel"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "futures-util",
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tonic-build",
+]
+
+[[package]]
+name = "grpcproxy-be"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "grpc-tunnel",
+ "http",
+ "hyper-util",
+ "puppy-core",
+ "rcgen",
+ "rustls",
+ "rustls-native-certs",
+ "rustls-pemfile",
+ "serde",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "toml",
+ "tonic",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "grpcproxy-fe"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "config",
+ "direct",
+ "grpc-tunnel",
+ "puppy-core",
+ "rcgen",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "h2"
 version = "0.4.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1751,6 +1809,8 @@ dependencies = [
  "clap",
  "config",
  "direct",
+ "grpcproxy-be",
+ "grpcproxy-fe",
  "httpproxy-be",
  "httpproxy-fe",
  "libc",

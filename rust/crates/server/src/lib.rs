@@ -9,9 +9,9 @@ use puppy_core::stats::Deps;
 use tracing_subscriber::EnvFilter;
 
 use config::{
-	BackendConfiguration, Configuration, FrontendConfiguration, HttpBackendConfiguration,
-	HttpFrontendConfiguration, SocksBackendConfiguration, SocksFrontendConfiguration,
-	TunFrontendConfiguration,
+	BackendConfiguration, Configuration, FrontendConfiguration, GrpcBackendConfiguration,
+	GrpcFrontendConfiguration, HttpBackendConfiguration, HttpFrontendConfiguration,
+	SocksBackendConfiguration, SocksFrontendConfiguration, TunFrontendConfiguration,
 };
 
 pub use config::ConfigError;
@@ -60,6 +60,7 @@ pub fn build_backend(
 		}
 		BackendConfiguration::Http(cfg) => build_http_backend(name, cfg),
 		BackendConfiguration::Socks(cfg) => build_socks_backend(name, cfg),
+		BackendConfiguration::Grpc(cfg) => build_grpc_backend(name, cfg),
 	}
 }
 
@@ -115,6 +116,31 @@ fn build_socks_backend(
 	Ok(Arc::new(backend))
 }
 
+fn build_grpc_backend(
+	name: &str,
+	file: &GrpcBackendConfiguration,
+) -> Result<Arc<dyn Backend>, BuildError> {
+	let runtime = grpcproxy_be::Configuration {
+		server_address: file.server_address.clone(),
+		tls: file.tls,
+		tls_ca_file: file.tls_ca_file.clone(),
+		tls_server_name: file.tls_server_name.clone(),
+		tls_insecure_skip_verify: file.tls_insecure_skip_verify,
+		token: file.token.clone(),
+	}
+	.backend_config()
+	.map_err(|e| BuildError::Backend {
+		name: name.to_string(),
+		source: anyhow!(e),
+	})?;
+	let backend =
+		grpcproxy_be::GrpcProxyBackend::new(runtime).map_err(|e| BuildError::Backend {
+			name: name.to_string(),
+			source: anyhow!(e),
+		})?;
+	Ok(Arc::new(backend))
+}
+
 /// A constructed frontend ready to run.
 ///
 /// Each variant wraps the typed `Server` from the corresponding frontend crate.
@@ -122,6 +148,7 @@ fn build_socks_backend(
 pub enum Frontend {
 	Http(httpproxy_fe::Server),
 	Socks(socksproxy_fe::Server),
+	Grpc(grpcproxy_fe::Server),
 	Tun(tun::server::Server),
 }
 
@@ -134,6 +161,7 @@ impl Frontend {
 		match self {
 			Frontend::Http(s) => s.run(shutdown).await,
 			Frontend::Socks(s) => s.run(shutdown).await,
+			Frontend::Grpc(s) => s.run(shutdown).await,
 			Frontend::Tun(s) => s.run(shutdown).await,
 		}
 	}
@@ -152,6 +180,9 @@ pub fn build_frontend(config: &Configuration, stats_deps: Deps) -> Result<Fronte
 		}
 		FrontendConfiguration::Socks(file) => {
 			build_socks_frontend(frontend_name, file, config, stats_deps)
+		}
+		FrontendConfiguration::Grpc(file) => {
+			build_grpc_frontend(frontend_name, file, config, stats_deps)
 		}
 		FrontendConfiguration::Tun(file) => {
 			build_tun_frontend(frontend_name, file, config, stats_deps)
@@ -211,6 +242,33 @@ fn build_socks_frontend(
 		source: anyhow!(e),
 	})?;
 	Ok(Frontend::Socks(server))
+}
+
+fn build_grpc_frontend(
+	name: &str,
+	file: &GrpcFrontendConfiguration,
+	config: &Configuration,
+	mut stats_deps: Deps,
+) -> Result<Frontend, BuildError> {
+	stats_deps.backend = file.backend.clone();
+	let backend = build_backend(&file.backend, &config.backends[&file.backend])
+		.map_err(|e| wrap_frontend_err(name, e))?;
+	let shim_buffer_size = shim_buffer_size(config, &file.shim, name)?;
+	let runtime = grpcproxy_fe::ServerConfiguration::from_file_config(
+		file,
+		backend,
+		shim_buffer_size,
+		stats_deps,
+	)
+	.map_err(|e| BuildError::Frontend {
+		name: name.to_string(),
+		source: anyhow!(e),
+	})?;
+	let server = grpcproxy_fe::Server::new(runtime).map_err(|e| BuildError::Frontend {
+		name: name.to_string(),
+		source: anyhow!(e),
+	})?;
+	Ok(Frontend::Grpc(server))
 }
 
 /// Builds the TUN frontend by resolving all candidate backends and the

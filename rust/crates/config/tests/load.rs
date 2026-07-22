@@ -504,3 +504,163 @@ fn load_configuration_rejects_unknown_grpc_field() {
 		"expected unknown field error, got: {err}"
 	);
 }
+
+#[test]
+fn load_configuration_grpc_decodes_valid() {
+	let contents = r#"
+frontend = "grpc_in"
+
+[frontends.grpc_in]
+type = "grpcproxy"
+listen_address = "127.0.0.1"
+listen_port = 9443
+tls_cert_file = "proxy-cert.pem"
+tls_key_file = "proxy-key.pem"
+token = "inbound-token"
+backend = "grpc_out"
+shim = "default_tunnel"
+
+[backends.grpc_out]
+type = "grpcproxy"
+server_address = "tunnel.example.com:443"
+tls = true
+tls_server_name = "tunnel.internal"
+token = "outbound-token"
+
+[shims.default_tunnel]
+buffer_size = 32768
+"#;
+	let cfg = load_str(contents).expect("load valid grpc configuration");
+
+	let fe = cfg.frontends.get("grpc_in").expect("grpc_in");
+	assert_eq!(fe.kind(), config::FrontendKind::Grpc);
+	let FrontendConfiguration::Grpc(grpc_fe) = fe else {
+		panic!("grpc_in is not grpc: {fe:?}");
+	};
+	assert_eq!(grpc_fe.listen_address, "127.0.0.1");
+	assert_eq!(grpc_fe.listen_port, 9443);
+	assert_eq!(grpc_fe.tls_cert_file, "proxy-cert.pem");
+	assert_eq!(grpc_fe.tls_key_file, "proxy-key.pem");
+	assert_eq!(grpc_fe.token, "inbound-token");
+	assert_eq!(grpc_fe.backend, "grpc_out");
+	assert_eq!(grpc_fe.shim, "default_tunnel");
+
+	let be = cfg.backends.get("grpc_out").expect("grpc_out");
+	assert_eq!(be.kind(), config::BackendKind::Grpc);
+	let config::BackendConfiguration::Grpc(grpc_be) = be else {
+		panic!("grpc_out is not grpc: {be:?}");
+	};
+	assert_eq!(grpc_be.server_address, "tunnel.example.com:443");
+	assert!(grpc_be.tls);
+	assert_eq!(grpc_be.tls_server_name, "tunnel.internal");
+	assert!(!grpc_be.tls_insecure_skip_verify);
+	assert_eq!(grpc_be.token, "outbound-token");
+}
+
+#[test]
+fn load_configuration_grpc_errors() {
+	let valid = r#"
+frontend = "g"
+
+[frontends.g]
+type = "grpcproxy"
+listen_address = "127.0.0.1"
+listen_port = 9443
+backend = "out"
+shim = "s"
+
+[backends.out]
+type = "grpcproxy"
+server_address = "tunnel.example.com:443"
+
+[shims.s]
+"#;
+	let cases: &[(&str, &str, &str)] = &[
+		(
+			"unknown grpc frontend field",
+			&valid.replace("listen_port = 9443", "listen_port = 9443\nextra = true"),
+			"frontends.g.extra",
+		),
+		(
+			"unknown grpc backend field",
+			&valid.replace(
+				r#"server_address = "tunnel.example.com:443""#,
+				"server_address = \"tunnel.example.com:443\"\nproxy_address = \"should-not-be-accepted:1\"",
+			),
+			"backends.out.proxy_address",
+		),
+		(
+			"grpc frontend missing address",
+			&valid.replace("listen_address = \"127.0.0.1\"\n", ""),
+			r#"frontend "g": listen_address is required"#,
+		),
+		(
+			"grpc frontend missing port",
+			&valid.replace("listen_port = 9443\n", ""),
+			r#"frontend "g": listen_port is required"#,
+		),
+		(
+			"grpc frontend unpaired tls cert",
+			&valid.replace(
+				"listen_port = 9443",
+				"listen_port = 9443\ntls_cert_file = \"proxy-cert.pem\"",
+			),
+			r#"frontend "g": tls_cert_file and tls_key_file"#,
+		),
+		(
+			"grpc frontend missing backend reference",
+			&valid.replace(r#"backend = "out""#, r#"backend = "missing""#),
+			r#"frontend "g": backend "missing" does not exist"#,
+		),
+		(
+			"grpc frontend missing shim reference",
+			&valid.replace(r#"shim = "s""#, r#"shim = "missing""#),
+			r#"frontend "g": shim "missing" does not exist"#,
+		),
+		(
+			"grpc backend missing server address",
+			&valid.replace("server_address = \"tunnel.example.com:443\"\n", ""),
+			r#"backend "out": server_address is required"#,
+		),
+		(
+			"grpc backend invalid server address",
+			&valid.replace(
+				"tunnel.example.com:443",
+				"tunnel.example.com",
+			),
+			r#"backend "out": server_address must be in host:port form"#,
+		),
+		(
+			"grpc backend zero port",
+			&valid.replace(
+				"tunnel.example.com:443",
+				"tunnel.example.com:0",
+			),
+			r#"backend "out": server_address port must be between 1 and 65535"#,
+		),
+		(
+			"grpc backend tls options without tls",
+			&valid.replace(
+				r#"server_address = "tunnel.example.com:443""#,
+				"server_address = \"tunnel.example.com:443\"\ntls_server_name = \"tunnel.internal\"",
+			),
+			r#"backend "out": tls_ca_file, tls_server_name, and tls_insecure_skip_verify require tls = true"#,
+		),
+		(
+			"grpc backend skip verify with ca file",
+			&valid.replace(
+				r#"server_address = "tunnel.example.com:443""#,
+				"server_address = \"tunnel.example.com:443\"\ntls = true\ntls_ca_file = \"ca.pem\"\ntls_insecure_skip_verify = true",
+			),
+			r#"backend "out": tls_insecure_skip_verify and tls_ca_file are mutually exclusive"#,
+		),
+	];
+
+	for (name, config, want_err) in cases {
+		let err = load_str(config).unwrap_err().to_string();
+		assert!(
+			err.contains(want_err),
+			"[{name}] error = {err:?}, want substring {want_err:?}"
+		);
+	}
+}

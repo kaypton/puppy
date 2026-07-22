@@ -2,6 +2,7 @@
 //!
 //! - HTTP CONNECT (`type = "httpproxy"`)
 //! - SOCKS5 (`type = "socksproxy"`)
+//! - gRPC tunnel (`type = "grpcproxy"`)
 //! - TUN (`type = "tun"`)
 
 use std::net::IpAddr;
@@ -16,6 +17,8 @@ pub enum FrontendConfiguration {
 	Http(HttpFrontendConfiguration),
 	#[serde(rename = "socksproxy")]
 	Socks(SocksFrontendConfiguration),
+	#[serde(rename = "grpcproxy")]
+	Grpc(GrpcFrontendConfiguration),
 	#[serde(rename = "tun")]
 	Tun(TunFrontendConfiguration),
 }
@@ -25,6 +28,7 @@ pub enum FrontendConfiguration {
 pub enum FrontendKind {
 	Http,
 	Socks,
+	Grpc,
 	Tun,
 }
 
@@ -33,6 +37,7 @@ impl FrontendConfiguration {
 		match self {
 			FrontendConfiguration::Http(_) => FrontendKind::Http,
 			FrontendConfiguration::Socks(_) => FrontendKind::Socks,
+			FrontendConfiguration::Grpc(_) => FrontendKind::Grpc,
 			FrontendConfiguration::Tun(_) => FrontendKind::Tun,
 		}
 	}
@@ -130,6 +135,49 @@ impl SocksFrontendConfiguration {
 		}
 		if (self.username.is_empty()) != (self.password.is_empty()) {
 			return Err("username and password must both be set or both be empty".to_string());
+		}
+		if self.backend.is_empty() {
+			return Err("backend reference is required".to_string());
+		}
+		if self.shim.is_empty() {
+			return Err("shim reference is required".to_string());
+		}
+		Ok(())
+	}
+}
+
+/// gRPC tunnel frontend configuration.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcFrontendConfiguration {
+	#[serde(default)]
+	pub listen_address: String,
+	#[serde(default)]
+	pub listen_port: u16,
+	#[serde(default)]
+	pub tls_cert_file: String,
+	#[serde(default)]
+	pub tls_key_file: String,
+	#[serde(default)]
+	pub token: String,
+	#[serde(default)]
+	pub backend: String,
+	#[serde(default)]
+	pub shim: String,
+}
+
+impl GrpcFrontendConfiguration {
+	pub fn validate(&self) -> Result<(), String> {
+		if self.listen_address.is_empty() {
+			return Err("listen_address is required".to_string());
+		}
+		if self.listen_port == 0 {
+			return Err("listen_port is required".to_string());
+		}
+		if (self.tls_cert_file.is_empty()) != (self.tls_key_file.is_empty()) {
+			return Err(
+				"tls_cert_file and tls_key_file must both be set or both be empty".to_string(),
+			);
 		}
 		if self.backend.is_empty() {
 			return Err("backend reference is required".to_string());

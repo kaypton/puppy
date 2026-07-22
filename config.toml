@@ -6,7 +6,7 @@ frontend = "local_http_proxy"
 
 # HTTP CONNECT frontend. local_http_proxy is a user-defined group name.
 [frontends.local_http_proxy]
-# Supported frontend types are httpproxy, socksproxy, and tun.
+# Supported frontend types are httpproxy, socksproxy, grpcproxy, and tun.
 type = "httpproxy"
 
 # Listener IP address. 127.0.0.1 accepts local connections only; use 0.0.0.0
@@ -102,6 +102,37 @@ tls = false
 # mutually exclusive with tls_ca_file.
 # tls_insecure_skip_verify = false
 
+# Upstream gRPC tunnel backend. It connects to a remote gRPC tunnel server (see
+# the grpcproxy frontend below) and tunnels traffic over a bidirectional stream.
+# This group is commented out; enable it by removing the leading "# " and
+# pointing a frontend's backend at upstream_grpc_tunnel.
+# [backends.upstream_grpc_tunnel]
+# type = "grpcproxy"
+
+# Address of the remote gRPC tunnel server in host:port form. Enclose IPv6
+# addresses in brackets.
+# server_address = "tunnel.example.com:443"
+
+# Connect to the tunnel server with TLS. The tls_* settings below apply only
+# when this value is true.
+# tls = true
+
+# CA certificate used to verify the tunnel server. Omission uses system roots.
+# This setting is mutually exclusive with tls_insecure_skip_verify.
+# tls_ca_file = "./certs/ca-cert.pem"
+
+# Override the TLS SNI and certificate verification name. Omission uses the
+# host part of server_address.
+# tls_server_name = "tunnel.internal"
+
+# Skip tunnel server certificate verification. Use only for tests. This setting
+# is mutually exclusive with tls_ca_file.
+# tls_insecure_skip_verify = false
+
+# Bearer token sent in the Authorization metadata. It must match the token of
+# the remote grpcproxy frontend; empty disables authentication.
+# token = "replace-with-a-long-random-token"
+
 # SOCKS5 frontend. Select it with frontend = "local_socks_proxy". It supports
 # CONNECT (TCP), with optional RFC 1929 authentication. Optional non-standard
 # SOCKS5-over-TLS requires clients to establish TLS before the SOCKS5 handshake.
@@ -126,6 +157,34 @@ password = "test12345"
 # Backend and shim groups used by this frontend.
 backend = "direct_out"
 shim = "default_tunnel"
+
+# gRPC tunnel frontend. Select it with frontend = "local_grpc_tunnel". It
+# accepts gRPC bidirectional-streaming tunnel requests from a remote grpcproxy
+# backend and forwards the traffic to the configured backend. This group is
+# commented out; enable it by removing the leading "# ".
+# [frontends.local_grpc_tunnel]
+# type = "grpcproxy"
+
+# Listener IP address. 127.0.0.1 accepts local connections only; use 0.0.0.0
+# to accept remote tunnel clients. Write IPv6 addresses without brackets.
+# listen_address = "127.0.0.1"
+
+# Listener TCP port, from 1 through 65535.
+# listen_port = 9443
+
+# Set both fields to require TLS from tunnel clients, or omit both for
+# plaintext gRPC. Relative paths use the process working directory.
+# tls_cert_file = "./certs/proxy-cert.pem"
+# tls_key_file = "./certs/proxy-key.pem"
+
+# Bearer token required in the Authorization metadata of every tunnel request.
+# It must match the token of the remote grpcproxy backend; empty disables
+# authentication.
+# token = "replace-with-a-long-random-token"
+
+# Backend and shim groups used by this frontend.
+# backend = "direct_out"
+# shim = "default_tunnel"
 
 # TUN frontend. Select it with frontend = "local_tun". It creates a virtual
 # interface and forwards host TCP/UDP traffic. It requires root privileges and

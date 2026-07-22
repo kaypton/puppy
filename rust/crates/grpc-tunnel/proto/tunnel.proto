@@ -1,0 +1,16 @@
+syntax = "proto3";
+package puppy.tunnel.v1;
+service Tunnel {
+  rpc Connect(stream Frame) returns (stream Frame);
+}
+message Frame {
+  oneof kind {
+    ConnectRequest connect = 1;
+    bytes payload = 2;
+  }
+}
+message ConnectRequest {
+  string network = 1;
+  string host = 2;
+  uint32 port = 3;
+}

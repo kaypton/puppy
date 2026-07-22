@@ -16,8 +16,8 @@ use std::path::PathBuf;
 use puppy_core::stats::{ConnectionRegistry, Deps, EventBus, StatsRegistry};
 
 use config::{
-	BackendConfiguration, Configuration, DirectBackendConfiguration, HttpBackendConfiguration,
-	SocksBackendConfiguration,
+	BackendConfiguration, Configuration, DirectBackendConfiguration, GrpcBackendConfiguration,
+	HttpBackendConfiguration, SocksBackendConfiguration,
 };
 use server::{build_backend, build_frontend};
 
@@ -50,6 +50,13 @@ listen_port = 1080
 backend = "direct_out"
 shim = "default_tunnel"
 
+[frontends.unused_grpc]
+type = "grpcproxy"
+listen_address = "127.0.0.1"
+listen_port = 9443
+backend = "tunnel_out"
+shim = "default_tunnel"
+
 [frontends.unused_tun]
 type = "tun"
 ipv4_address = "10.0.0.1/24"
@@ -73,6 +80,11 @@ type = "socksproxy"
 proxy_address = "socks.example.com:1080"
 username = "carol"
 password = "swordfish"
+
+[backends.tunnel_out]
+type = "grpcproxy"
+server_address = "tunnel.example.com:443"
+token = "outbound-token"
 
 [shims.default_tunnel]
 buffer_size = 32768
@@ -175,6 +187,47 @@ fn build_backend_socks_returns_socks_backend() {
 }
 
 #[test]
+fn build_backend_grpc_returns_grpc_backend() {
+	// gRPC tunnel backend case.
+	let backend = build_backend(
+		"tunnel_out",
+		&BackendConfiguration::Grpc(GrpcBackendConfiguration {
+			server_address: "tunnel.example.com:443".to_string(),
+			token: "outbound-token".to_string(),
+			..Default::default()
+		}),
+	)
+	.expect("build gRPC backend");
+	let caps = backend.capabilities();
+	assert_eq!(
+		caps,
+		vec![puppy_core::backend::Capability {
+			network: "tcp".to_string(),
+			protocol: puppy_core::backend::Protocol::Any,
+		}],
+		"gRPC backend should support tcp+Any, got {caps:?}"
+	);
+}
+
+#[test]
+fn build_backend_grpc_missing_server_address_wraps_error() {
+	// When `server_address` is empty, `Configuration::backend_config` fails
+	// validation and the error is wrapped as `build backend "<name>": ...`.
+	let err = match build_backend(
+		"bad",
+		&BackendConfiguration::Grpc(GrpcBackendConfiguration::default()),
+	) {
+		Ok(_) => panic!("expected build error"),
+		Err(e) => e,
+	};
+	let msg = err.to_string();
+	assert!(
+		msg.starts_with(r#"build backend "bad":"#),
+		"error should be wrapped as `build backend \"bad\": ...`, got: {msg}"
+	);
+}
+
+#[test]
 fn build_backend_http_tls_ca_load_failure_wraps_error() {
 	// When `tls = true` and `tls_ca_file` points at a non-existent file,
 	// validation passes (the path is non-empty and `tls_insecure_skip_verify`
@@ -224,6 +277,20 @@ fn build_selected_frontend_socks() {
 	let frontend =
 		build_frontend(&config, test_stats_deps(&config.frontend)).expect("build frontend");
 	assert!(matches!(frontend, server::Frontend::Socks(_)));
+}
+
+#[test]
+fn build_selected_frontend_grpc() {
+	// gRPC tunnel frontend construction.
+	let contents = VALID_CONFIGURATION.replacen(
+		r#"frontend = "office_proxy""#,
+		r#"frontend = "unused_grpc""#,
+		1,
+	);
+	let config = load_str(&contents);
+	let frontend =
+		build_frontend(&config, test_stats_deps(&config.frontend)).expect("build frontend");
+	assert!(matches!(frontend, server::Frontend::Grpc(_)));
 }
 
 #[test]

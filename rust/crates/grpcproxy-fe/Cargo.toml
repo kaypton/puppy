@@ -1,0 +1,26 @@
+[package]
+name = "grpcproxy-fe"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+puppy-core = { path = "../puppy-core" }
+config = { path = "../config" }
+grpc-tunnel = { path = "../grpc-tunnel" }
+tonic = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+grpc-tunnel = { path = "../grpc-tunnel" }
+async-trait = { workspace = true }
+puppy-core = { path = "../puppy-core" }
+direct = { path = "../direct" }
+rcgen = "0.13"

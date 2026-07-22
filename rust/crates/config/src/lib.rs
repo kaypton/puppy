@@ -15,13 +15,13 @@ mod observability;
 mod shim;
 
 pub use backend::{
-	BackendConfiguration, BackendKind, DirectBackendConfiguration, HttpBackendConfiguration,
-	SocksBackendConfiguration,
+	BackendConfiguration, BackendKind, DirectBackendConfiguration, GrpcBackendConfiguration,
+	HttpBackendConfiguration, SocksBackendConfiguration,
 };
 pub use error::{ConfigError, ValidationError};
 pub use frontend::{
-	FrontendConfiguration, FrontendKind, HttpFrontendConfiguration, SocksFrontendConfiguration,
-	TunFrontendConfiguration,
+	FrontendConfiguration, FrontendKind, GrpcFrontendConfiguration, HttpFrontendConfiguration,
+	SocksFrontendConfiguration, TunFrontendConfiguration,
 };
 pub use grpc::GrpcConfiguration;
 pub use observability::ObservabilityConfiguration;
@@ -146,6 +146,28 @@ impl Configuration {
 					)));
 				}
 			}
+			FrontendKind::Grpc => {
+				let FrontendConfiguration::Grpc(cfg) = group else {
+					return Err(ValidationError::new(format!(
+						"frontend {name:?}: configuration does not match type {:?}",
+						"grpcproxy"
+					)));
+				};
+				cfg.validate()
+					.map_err(|e| ValidationError::new(format!("frontend {name:?}: {e}")))?;
+				if !self.backends.contains_key(&cfg.backend) {
+					return Err(ValidationError::new(format!(
+						"frontend {name:?}: backend {:?} does not exist",
+						cfg.backend
+					)));
+				}
+				if !self.shims.contains_key(&cfg.shim) {
+					return Err(ValidationError::new(format!(
+						"frontend {name:?}: shim {:?} does not exist",
+						cfg.shim
+					)));
+				}
+			}
 			FrontendKind::Tun => {
 				let FrontendConfiguration::Tun(cfg) = group else {
 					return Err(ValidationError::new(format!(
@@ -233,8 +255,8 @@ pub fn load(path: &Path) -> Result<Configuration, ConfigError> {
 }
 
 /// Frontend/backend `type` discriminants recognised by the schema.
-const FRONTEND_KINDS: &[&str] = &["httpproxy", "socksproxy", "tun"];
-const BACKEND_KINDS: &[&str] = &["direct", "httpproxy", "socksproxy"];
+const FRONTEND_KINDS: &[&str] = &["httpproxy", "socksproxy", "grpcproxy", "tun"];
+const BACKEND_KINDS: &[&str] = &["direct", "httpproxy", "socksproxy", "grpcproxy"];
 
 /// Pass 1: walk frontends then backends in sorted name order and return the
 /// first group whose `type` is not a recognised discriminant. This mirrors
@@ -430,6 +452,15 @@ fn frontend_known_fields(kind: &str) -> &'static [&'static str] {
 			"backend",
 			"shim",
 		],
+		"grpcproxy" => &[
+			"listen_address",
+			"listen_port",
+			"tls_cert_file",
+			"tls_key_file",
+			"token",
+			"backend",
+			"shim",
+		],
 		"tun" => &[
 			"device_name",
 			"ipv4_address",
@@ -460,6 +491,14 @@ fn backend_known_fields(kind: &str) -> &'static [&'static str] {
 			"tls_ca_file",
 			"tls_server_name",
 			"tls_insecure_skip_verify",
+		],
+		"grpcproxy" => &[
+			"server_address",
+			"tls",
+			"tls_ca_file",
+			"tls_server_name",
+			"tls_insecure_skip_verify",
+			"token",
 		],
 		_ => &[],
 	}

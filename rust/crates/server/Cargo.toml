@@ -21,6 +21,8 @@ httpproxy-fe = { path = "../httpproxy-fe" }
 socksproxy-fe = { path = "../socksproxy-fe" }
 httpproxy-be = { path = "../httpproxy-be" }
 socksproxy-be = { path = "../socksproxy-be" }
+grpcproxy-fe = { path = "../grpcproxy-fe" }
+grpcproxy-be = { path = "../grpcproxy-be" }
 tun = { path = "../tun" }
 puppy-rpc = { path = "../puppy-rpc" }
 puppy-observability = { path = "../puppy-observability" }

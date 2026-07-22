@@ -3,6 +3,7 @@
 //! - direct (`type = "direct"`)
 //! - HTTP CONNECT (`type = "httpproxy"`)
 //! - SOCKS5 (`type = "socksproxy"`)
+//! - gRPC tunnel (`type = "grpcproxy"`)
 
 use serde::Deserialize;
 
@@ -16,6 +17,8 @@ pub enum BackendConfiguration {
 	Http(HttpBackendConfiguration),
 	#[serde(rename = "socksproxy")]
 	Socks(SocksBackendConfiguration),
+	#[serde(rename = "grpcproxy")]
+	Grpc(GrpcBackendConfiguration),
 }
 
 /// Discriminant accessor.
@@ -24,6 +27,7 @@ pub enum BackendKind {
 	Direct,
 	Http,
 	Socks,
+	Grpc,
 }
 
 impl BackendConfiguration {
@@ -32,6 +36,7 @@ impl BackendConfiguration {
 			BackendConfiguration::Direct(_) => BackendKind::Direct,
 			BackendConfiguration::Http(_) => BackendKind::Http,
 			BackendConfiguration::Socks(_) => BackendKind::Socks,
+			BackendConfiguration::Grpc(_) => BackendKind::Grpc,
 		}
 	}
 
@@ -40,6 +45,7 @@ impl BackendConfiguration {
 			BackendConfiguration::Direct(c) => c.validate(),
 			BackendConfiguration::Http(c) => c.validate(),
 			BackendConfiguration::Socks(c) => c.validate(),
+			BackendConfiguration::Grpc(c) => c.validate(),
 		}
 	}
 }
@@ -95,6 +101,24 @@ pub struct SocksBackendConfiguration {
 	pub tls_insecure_skip_verify: bool,
 }
 
+/// Upstream gRPC tunnel backend configuration.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrpcBackendConfiguration {
+	#[serde(default)]
+	pub server_address: String,
+	#[serde(default)]
+	pub tls: bool,
+	#[serde(default)]
+	pub tls_ca_file: String,
+	#[serde(default)]
+	pub tls_server_name: String,
+	#[serde(default)]
+	pub tls_insecure_skip_verify: bool,
+	#[serde(default)]
+	pub token: String,
+}
+
 impl HttpBackendConfiguration {
 	pub fn validate(&self) -> Result<(), String> {
 		validate_proxy_backend(
@@ -120,6 +144,41 @@ impl SocksBackendConfiguration {
 			&self.tls_server_name,
 			self.tls_insecure_skip_verify,
 		)
+	}
+}
+
+impl GrpcBackendConfiguration {
+	pub fn validate(&self) -> Result<(), String> {
+		if self.server_address.is_empty() {
+			return Err("server_address is required".to_string());
+		}
+		let (host, port_str) = split_host_port(&self.server_address)
+			.map_err(|e| format!("server_address must be in host:port form: {e}"))?;
+		if host.is_empty() {
+			return Err("server_address host is required".to_string());
+		}
+		let port: u16 = port_str.parse().map_err(|e: std::num::ParseIntError| {
+			format!("server_address must be in host:port form: {e}")
+		})?;
+		if port == 0 {
+			return Err("server_address port must be between 1 and 65535".to_string());
+		}
+		if !self.tls
+			&& (!self.tls_ca_file.is_empty()
+				|| !self.tls_server_name.is_empty()
+				|| self.tls_insecure_skip_verify)
+		{
+			return Err(
+				"tls_ca_file, tls_server_name, and tls_insecure_skip_verify require tls = true"
+					.to_string(),
+			);
+		}
+		if self.tls_insecure_skip_verify && !self.tls_ca_file.is_empty() {
+			return Err(
+				"tls_insecure_skip_verify and tls_ca_file are mutually exclusive".to_string(),
+			);
+		}
+		Ok(())
 	}
 }
 

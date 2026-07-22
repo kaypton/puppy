@@ -1,0 +1,34 @@
+[package]
+name = "grpcproxy-be"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+puppy-core = { path = "../puppy-core" }
+grpc-tunnel = { path = "../grpc-tunnel" }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-rustls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+rustls-native-certs = { workspace = true }
+tonic = { workspace = true }
+futures-util = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+serde = { workspace = true }
+hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
+http = "1"
+tower-service = "0.3"
+
+[dev-dependencies]
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tonic = { workspace = true }
+grpc-tunnel = { path = "../grpc-tunnel" }
+puppy-core = { path = "../puppy-core" }
+toml = { workspace = true }
+rcgen = "0.13"
